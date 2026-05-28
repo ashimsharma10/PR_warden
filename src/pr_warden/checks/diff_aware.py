@@ -1,3 +1,4 @@
+import fnmatch
 import re
 from pathlib import PurePosixPath
 
@@ -52,16 +53,24 @@ def _is_source_file(filename: str) -> bool:
     return bool(_SOURCE_EXT_RE.search(filename)) and not _is_test_file(filename)
 
 
+def _matches_any_glob(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+
 # ── Check #5: trivial metadata-only diff ──────────────────────────────────────
 
+
 @register
-def check_trivial_metadata_diff(ctx: CheckContext) -> CheckResult:
+def check_trivial_metadata_diff(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.trivial_metadata_diff
+    if not cfg.enabled:
+        return None
     if not ctx.files:
         return CheckResult("trivial_metadata_diff", True, "")
     if not all(_is_metadata_file(f["filename"]) for f in ctx.files):
         return CheckResult("trivial_metadata_diff", True, "")
     total = ctx.pr.additions + ctx.pr.deletions
-    if total < 20:
+    if total < cfg.max_lines:
         return CheckResult(
             "trivial_metadata_diff", False,
             f"Only documentation files changed ({total} lines total)",
@@ -71,22 +80,35 @@ def check_trivial_metadata_diff(ctx: CheckContext) -> CheckResult:
 
 # ── Check #9: no tests for code change ────────────────────────────────────────
 
+
 @register
-def check_no_tests(ctx: CheckContext) -> CheckResult:
+def check_no_tests(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.no_tests
+    if not cfg.enabled:
+        return None
     if not ctx.files:
         return CheckResult("no_tests", True, "")
+
     filenames = [f["filename"] for f in ctx.files]
-    source_changed = any(_is_source_file(fn) for fn in filenames)
+    # Exclude exempt paths from the source-file population
+    source_files = [
+        fn for fn in filenames
+        if _is_source_file(fn) and not _matches_any_glob(fn, cfg.exempt_paths)
+    ]
     tests_changed = any(_is_test_file(fn) for fn in filenames)
-    if source_changed and not tests_changed:
+
+    if source_files and not tests_changed:
         return CheckResult("no_tests", False, "Source files changed with no test file changes")
     return CheckResult("no_tests", True, "")
 
 
 # ── Check #10: test assertions weakened ───────────────────────────────────────
 
+
 @register
-def check_test_assertions_weakened(ctx: CheckContext) -> CheckResult:
+def check_test_assertions_weakened(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.test_assertions_weakened.enabled:
+        return None
     for f in ctx.files:
         if not _is_test_file(f["filename"]):
             continue
@@ -105,8 +127,11 @@ def check_test_assertions_weakened(ctx: CheckContext) -> CheckResult:
 
 # ── Check #12: empty function bodies ──────────────────────────────────────────
 
+
 @register
-def check_empty_function_bodies(ctx: CheckContext) -> CheckResult:
+def check_empty_function_bodies(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.empty_function_bodies.enabled:
+        return None
     for f in ctx.files:
         patch = f.get("patch", "")
         if not patch:
@@ -126,8 +151,11 @@ def check_empty_function_bodies(ctx: CheckContext) -> CheckResult:
 
 # ── Check #13: dependency-only churn ──────────────────────────────────────────
 
+
 @register
-def check_dependency_only_churn(ctx: CheckContext) -> CheckResult:
+def check_dependency_only_churn(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.dependency_only_churn.enabled:
+        return None
     if not ctx.files:
         return CheckResult("dependency_only_churn", True, "")
     basenames = {PurePosixPath(f["filename"]).name for f in ctx.files}

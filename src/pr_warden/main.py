@@ -16,6 +16,7 @@ from pr_warden.github import auth, client
 from pr_warden.github.schemas import PullRequestEvent
 from pr_warden.github.webhooks import verify_signature
 from pr_warden.models import PRCheck, Repo
+from pr_warden.repo_config import CONFIG_PATH, DEFAULT_CONFIG, RepoConfig, parse_config
 
 log = structlog.get_logger()
 
@@ -58,8 +59,17 @@ async def webhook(
     return {"ok": True}
 
 
+async def _load_repo_config(token: str, repo: str) -> RepoConfig:
+    try:
+        raw = await client.get_repo_file(token, repo, CONFIG_PATH)
+    except Exception:
+        log.exception("repo_config.fetch_failed")
+        return DEFAULT_CONFIG
+    return parse_config(raw)
+
+
 async def _build_check_context(
-    token: str, repo: str, event: PullRequestEvent
+    token: str, repo: str, event: PullRequestEvent, config: RepoConfig
 ) -> CheckContext:
     files, commits = await asyncio.gather(
         client.list_pr_files(token, repo, event.number),
@@ -70,6 +80,7 @@ async def _build_check_context(
         pr=event.pull_request,
         files=files if isinstance(files, list) else [],
         commits=commits if isinstance(commits, list) else [],
+        config=config,
     )
 
 
@@ -85,13 +96,15 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         token = await auth.get_installation_token(event.installation.id)
         repo = event.repository.full_name
 
-        ctx = await _build_check_context(token, repo, event)
+        config = await _load_repo_config(token, repo)
+        ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
         comment_body = build_comment(results)
         label = pick_label(results)
 
         async with async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
+            repo_row.cached_config = config.model_dump()
 
             existing_comment_id = await session.scalar(
                 select(PRCheck.comment_id)

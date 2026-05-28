@@ -5,14 +5,12 @@ from pr_warden.checks.registry import CheckContext, CheckResult, register
 # ── Existing quality gates ─────────────────────────────────────────────────────
 
 _GENERIC_TITLES = {"fix", "update", "wip", "hotfix", "patch", "changes", "stuff", "misc"}
-_BRANCH_PREFIX_RE = re.compile(r"^(feat|fix|chore|docs|refactor|test|ci|build)/")
-
-PR_SIZE_FILE_LIMIT = 25
-PR_SIZE_LINE_LIMIT = 500
 
 
 @register
-def check_title_quality(ctx: CheckContext) -> CheckResult:
+def check_title_quality(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.title_quality.enabled:
+        return None
     title = ctx.pr.title.strip()
     if not title:
         return CheckResult("title_quality", False, "Title is empty")
@@ -25,26 +23,35 @@ def check_title_quality(ctx: CheckContext) -> CheckResult:
 
 
 @register
-def check_description(ctx: CheckContext) -> CheckResult:
+def check_description(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.description
+    if not cfg.enabled:
+        return None
     body = (ctx.pr.body or "").strip()
-    if len(body) < 20:
-        return CheckResult("description", False, "Body is empty or too short (< 20 chars)")
+    if len(body) < cfg.min_chars:
+        return CheckResult(
+            "description", False,
+            f"Body is empty or too short (< {cfg.min_chars} chars)",
+        )
     return CheckResult("description", True, "")
 
 
 @register
-def check_pr_size(ctx: CheckContext) -> CheckResult:
+def check_pr_size(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.pr_size
+    if not cfg.enabled:
+        return None
     pr = ctx.pr
-    if pr.changed_files > PR_SIZE_FILE_LIMIT:
+    if pr.changed_files > cfg.file_limit:
         return CheckResult(
             "pr_size", False,
-            f"Too many files: {pr.changed_files} (limit {PR_SIZE_FILE_LIMIT})",
+            f"Too many files: {pr.changed_files} (limit {cfg.file_limit})",
         )
     total_lines = pr.additions + pr.deletions
-    if total_lines > PR_SIZE_LINE_LIMIT:
+    if total_lines > cfg.line_limit:
         return CheckResult(
             "pr_size", False,
-            f"Too many lines: {total_lines} (limit {PR_SIZE_LINE_LIMIT})",
+            f"Too many lines: {total_lines} (limit {cfg.line_limit})",
         )
     return CheckResult(
         "pr_size", True,
@@ -53,18 +60,24 @@ def check_pr_size(ctx: CheckContext) -> CheckResult:
 
 
 @register
-def check_branch_naming(ctx: CheckContext) -> CheckResult:
+def check_branch_naming(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.branch_naming
+    if not cfg.enabled:
+        return None
     branch = ctx.pr.head.ref
-    if not _BRANCH_PREFIX_RE.match(branch):
+    pattern = re.compile(rf"^({'|'.join(re.escape(p) for p in cfg.allowed_prefixes)})/")
+    if not pattern.match(branch):
         return CheckResult(
             "branch_naming", False,
-            f'"{branch}" must start with feat/fix/chore/docs/refactor/test/ci/build/',
+            f'"{branch}" must start with {"/".join(cfg.allowed_prefixes)}/',
         )
     return CheckResult("branch_naming", True, "")
 
 
 @register
-def check_self_merge(ctx: CheckContext) -> CheckResult:
+def check_self_merge(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.self_merge.enabled:
+        return None
     author = ctx.pr.user.login
     reviewers = [r.login for r in ctx.pr.requested_reviewers]
     if not reviewers:
@@ -76,15 +89,18 @@ def check_self_merge(ctx: CheckContext) -> CheckResult:
 
 # ── Anti-slop: AI fingerprints ─────────────────────────────────────────────────
 
-_AI_BRANCH_RE = re.compile(
-    r"^(claude|codex|cursor|copilot|devin)[-/]", re.IGNORECASE
-)
-
 
 @register
-def check_ai_branch(ctx: CheckContext) -> CheckResult:
+def check_ai_branch(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.ai_branch
+    if not cfg.enabled:
+        return None
     branch = ctx.pr.head.ref
-    if _AI_BRANCH_RE.match(branch):
+    pattern = re.compile(
+        rf"^({'|'.join(re.escape(t) for t in cfg.tools)})[-/]",
+        re.IGNORECASE,
+    )
+    if pattern.match(branch):
         return CheckResult("ai_branch", False, f'Branch "{branch}" looks AI-generated')
     return CheckResult("ai_branch", True, "")
 
@@ -97,11 +113,12 @@ _AI_FOOTER_RE = re.compile(
 
 
 @register
-def check_ai_commit_footer(ctx: CheckContext) -> CheckResult:
+def check_ai_commit_footer(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.ai_commit_footer.enabled:
+        return None
     for commit in ctx.commits:
         message = commit.get("commit", {}).get("message", "")
-        m = _AI_FOOTER_RE.search(message)
-        if m:
+        if _AI_FOOTER_RE.search(message):
             short = message.split("\n")[0][:72]
             return CheckResult(
                 "ai_commit_footer", False,
@@ -124,7 +141,9 @@ _BOILERPLATE_RES = [
 
 
 @register
-def check_boilerplate_description(ctx: CheckContext) -> CheckResult:
+def check_boilerplate_description(ctx: CheckContext) -> CheckResult | None:
+    if not ctx.config.checks.boilerplate_description.enabled:
+        return None
     body = ctx.pr.body or ""
     for pattern in _BOILERPLATE_RES:
         if pattern.search(body):
@@ -137,16 +156,16 @@ def check_boilerplate_description(ctx: CheckContext) -> CheckResult:
 
 # ── Anti-slop: description too thin for the diff ──────────────────────────────
 
-_DESC_MIN_CHARS = 50
-_DIFF_MIN_LINES = 100
-
 
 @register
-def check_description_vs_diff(ctx: CheckContext) -> CheckResult:
+def check_description_vs_diff(ctx: CheckContext) -> CheckResult | None:
+    cfg = ctx.config.checks.description_vs_diff
+    if not cfg.enabled:
+        return None
     pr = ctx.pr
     body_len = len((pr.body or "").strip())
     diff_lines = pr.additions + pr.deletions
-    if body_len < _DESC_MIN_CHARS and diff_lines > _DIFF_MIN_LINES:
+    if body_len < cfg.min_desc_chars and diff_lines > cfg.min_diff_lines:
         return CheckResult(
             "description_vs_diff", False,
             f"Description is {body_len} chars for a {diff_lines}-line diff",

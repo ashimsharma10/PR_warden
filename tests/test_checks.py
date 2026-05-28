@@ -20,6 +20,7 @@ from pr_warden.checks.no_diff import (
     check_title_quality,
 )
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
+from pr_warden.repo_config import RepoConfig, parse_config
 
 
 def _pr(**kwargs) -> PullRequest:
@@ -45,11 +46,12 @@ def _ctx(**pr_kwargs) -> CheckContext:
     return CheckContext(pr=_pr(**pr_kwargs))
 
 
-def _ctx_with(pr=None, files=None, commits=None) -> CheckContext:
+def _ctx_with(pr=None, files=None, commits=None, config=None) -> CheckContext:
     return CheckContext(
         pr=pr or _pr(),
         files=files or [],
         commits=commits or [],
+        config=config or RepoConfig(),
     )
 
 
@@ -342,3 +344,62 @@ def test_dep_churn_lockfile_plus_source():
 
 def test_dep_churn_no_files():
     assert check_dependency_only_churn(_ctx_with(files=[])).passed is True
+
+
+# ── Config-driven behavior ────────────────────────────────────────────────────
+
+def test_disabled_check_returns_none():
+    cfg = parse_config("checks:\n  branch_naming:\n    enabled: false\n")
+    pr = _pr(head=Ref(ref="garbage-name", sha="abc"))
+    assert check_branch_naming(_ctx_with(pr=pr, config=cfg)) is None
+
+
+def test_pr_size_custom_file_limit():
+    cfg = parse_config("checks:\n  pr_size:\n    file_limit: 100\n    line_limit: 5000\n")
+    pr = _pr(changed_files=50, additions=200, deletions=200)
+    assert check_pr_size(_ctx_with(pr=pr, config=cfg)).passed is True
+
+
+def test_description_custom_min_chars():
+    cfg = parse_config("checks:\n  description:\n    min_chars: 5\n")
+    assert check_description(_ctx_with(pr=_pr(body="short"), config=cfg)).passed is True
+
+
+def test_branch_naming_custom_allowed_prefixes():
+    cfg = parse_config(
+        "checks:\n  branch_naming:\n    allowed_prefixes: [feature, bugfix]\n"
+    )
+    pr_ok = _pr(head=Ref(ref="feature/x", sha="abc"))
+    pr_bad = _pr(head=Ref(ref="feat/x", sha="abc"))
+    assert check_branch_naming(_ctx_with(pr=pr_ok, config=cfg)).passed is True
+    assert check_branch_naming(_ctx_with(pr=pr_bad, config=cfg)).passed is False
+
+
+def test_ai_branch_custom_tools():
+    cfg = parse_config("checks:\n  ai_branch:\n    tools: [bard]\n")
+    pr_bard = _pr(head=Ref(ref="bard-feature", sha="abc"))
+    pr_claude = _pr(head=Ref(ref="claude-feature", sha="abc"))
+    assert check_ai_branch(_ctx_with(pr=pr_bard, config=cfg)).passed is False
+    # claude is no longer in the configured list
+    assert check_ai_branch(_ctx_with(pr=pr_claude, config=cfg)).passed is True
+
+
+def test_no_tests_exempt_paths():
+    cfg = parse_config(
+        "checks:\n  no_tests:\n    exempt_paths:\n      - 'scripts/**'\n"
+    )
+    files = [{"filename": "scripts/migrate.py"}]
+    assert check_no_tests(_ctx_with(files=files, config=cfg)).passed is True
+
+
+def test_run_checks_skips_disabled():
+    from pr_warden.checks import run_checks
+    cfg = parse_config(
+        "checks:\n  title_quality:\n    enabled: false\n"
+        "  description:\n    enabled: false\n"
+    )
+    results = run_checks(_ctx_with(config=cfg))
+    names = {r.name for r in results}
+    assert "title_quality" not in names
+    assert "description" not in names
+    assert "branch_naming" in names  # still enabled

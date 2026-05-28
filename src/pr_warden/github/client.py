@@ -29,6 +29,21 @@ async def get_pull_request(token: str, repo: str, pr_number: int) -> dict:
     return r.json()
 
 
+async def get_repo_file(token: str, repo: str, path: str) -> str | None:
+    """Fetch a file's raw contents at the repo's default branch.
+
+    Returns None if the file does not exist (404). Other errors raise.
+    """
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/contents/{path}",
+        headers={**_headers(token), "Accept": "application/vnd.github.raw"},
+    )
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.text
+
+
 async def list_pr_commits(token: str, repo: str, pr_number: int) -> list[dict]:
     commits: list[dict] = []
     page = 1
