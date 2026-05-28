@@ -1,0 +1,2 @@
+# Week 1: not needed locally. SQLite runs in-process; just `uvicorn pr_warden.main:app --reload`.
+# Week 2: re-add app service for VPS deploy.
