@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import pr_warden.log as pr_warden_log
 from pr_warden.checks import CheckContext, run_checks
+from pr_warden.checks.impact import run_gitleaks
 from pr_warden.composer import LABEL_CLEAN, LABEL_NEEDS_ATTENTION, build_comment, pick_label
 from pr_warden.config import settings
 from pr_warden.db import async_session_factory, engine, get_session
@@ -79,13 +80,20 @@ async def _build_check_context(
         client.get_codeowners(token, repo),
         return_exceptions=True,
     )
+
+    actual_files = files if isinstance(files, list) else []
+
+    # run_gitleaks needs the file list, so it runs after the first gather
+    gitleaks_findings = await run_gitleaks(actual_files)
+
     return CheckContext(
         pr=event.pull_request,
-        files=files if isinstance(files, list) else [],
+        files=actual_files,
         commits=commits if isinstance(commits, list) else [],
         config=config,
         repo_tree=repo_tree if isinstance(repo_tree, list) else [],
         codeowners_raw=codeowners if isinstance(codeowners, str) else None,
+        gitleaks_findings=gitleaks_findings,
     )
 
 

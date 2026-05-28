@@ -20,6 +20,10 @@ class CheckContext:
     config: RepoConfig = field(default_factory=lambda: DEFAULT_CONFIG)
     repo_tree: list[str] = field(default_factory=list)
     codeowners_raw: str | None = None
+    # None  → gitleaks binary not available, scan was skipped
+    # []    → gitleaks ran, no secrets found
+    # [...] → gitleaks ran, findings present
+    gitleaks_findings: list[dict] | None = None
 
 
 # A check returns None when disabled by config; otherwise a CheckResult.

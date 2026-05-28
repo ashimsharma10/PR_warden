@@ -1,18 +1,22 @@
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from pr_warden.checks import CheckContext
 from pr_warden.checks.impact import (
     CodeownersRule,
-    SecretFinding,
     _codeowners_match,
     _critical_path_match,
+    _write_diff_additions,
     check_codeowners,
     check_critical_path,
     check_secret_leak,
     check_shared_code,
     find_owners,
     parse_codeowners,
-    scan_diff_secrets,
+    run_gitleaks,
 )
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 from pr_warden.repo_config import RepoConfig, parse_config
@@ -39,7 +43,7 @@ def _pr(**kwargs) -> PullRequest:
 
 def _ctx(
     pr=None, files=None, commits=None, config=None,
-    repo_tree=None, codeowners_raw=None,
+    repo_tree=None, codeowners_raw=None, gitleaks_findings=None,
 ) -> CheckContext:
     return CheckContext(
         pr=pr or _pr(),
@@ -48,166 +52,171 @@ def _ctx(
         config=config or RepoConfig(),
         repo_tree=repo_tree or [],
         codeowners_raw=codeowners_raw,
+        gitleaks_findings=gitleaks_findings,
     )
 
 
-# ── Secret scanning: pattern coverage ─────────────────────────────────────────
+# ── _write_diff_additions helper ─────────────────────────────────────────────
 
 
-class TestSecretScanning:
+class TestWriteDiffAdditions:
 
-    # ── Platform-specific patterns (high confidence, known prefixes) ───────
+    def test_only_added_lines_written(self, tmp_path):
+        files = [{"filename": "src/auth.py", "patch": "-old = 1\n+new = 2\n context"}]
+        has_content = _write_diff_additions(str(tmp_path), files)
+        assert has_content is True
+        written = (tmp_path / "src" / "auth.py").read_text()
+        assert "new = 2" in written
+        assert "old = 1" not in written
+        assert "context" not in written
 
-    def test_aws_access_key(self):
-        files = [{"filename": "config.py", "patch": "+AWS_KEY = 'AKIAIOSFODNN7EXAMPLE'"}]
-        findings = scan_diff_secrets(files)
-        assert len(findings) == 1
-        assert findings[0].rule == "aws-access-key-id"
-
-    def test_github_pat(self):
-        files = [{"filename": ".env", "patch": "+TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"}]
-        assert any(f.rule == "github-pat" for f in scan_diff_secrets(files))
-
-    def test_private_key(self):
-        files = [{"filename": "key.pem", "patch": "+-----BEGIN RSA PRIVATE KEY-----"}]
-        assert any(f.rule == "private-key" for f in scan_diff_secrets(files))
-
-    def test_private_key_ec(self):
-        files = [{"filename": "key.pem", "patch": "+-----BEGIN EC PRIVATE KEY-----"}]
-        assert any(f.rule == "private-key" for f in scan_diff_secrets(files))
-
-    def test_stripe_live_key(self):
-        files = [{"filename": "pay.py", "patch": "+sk_live_ABCDEFGHIJKLMNOPQRSTUVWXYZab"}]
-        assert any(f.rule == "stripe-live-secret" for f in scan_diff_secrets(files))
-
-    def test_db_connection_string(self):
-        files = [{"filename": "db.py", "patch": "+DSN = 'postgres://admin:s3cret@db.host.com:5432/prod'"}]
-        assert any(f.rule == "db-connection-string" for f in scan_diff_secrets(files))
-
-    # ── Generic patterns (catches any platform, any service) ──────────────
-
-    def test_generic_catches_kubernetes_token(self):
-        files = [{"filename": "deploy.py", "patch": "+SERVICE_ACCOUNT_KEY = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'"}]
-        findings = scan_diff_secrets(files)
-        assert len(findings) >= 1
-
-    def test_generic_catches_datadog_api_key(self):
-        files = [{"filename": "monitoring.py", "patch": "+api_key = 'dd49a1c7e3b84f6ea2c0d5e8f7a9b3c1d4e6f8a0b2c4d6e8f0a1b3c5d7e9f0a1'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule in ("generic-secret", "generic-hex-secret") for f in findings)
-
-    def test_generic_catches_sendgrid_key(self):
-        files = [{"filename": "email.py", "patch": "+api_secret = 'SG.abcdefghijklmnop.qrstuvwxyz012345'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-secret" for f in findings)
-
-    def test_generic_catches_arbitrary_token(self):
-        files = [{"filename": "service.py", "patch": "+auth_token = 'xK9mP2nQ7rS4tU8vW1yZ3aB5cD7eF9gH'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-secret" for f in findings)
-
-    def test_generic_catches_password_in_config(self):
-        files = [{"filename": "settings.yml", "patch": "+password: 'Sup3rS3cr3tP@ssw0rd!'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-secret" for f in findings)
-
-    def test_generic_catches_jwt_anywhere(self):
-        files = [{"filename": "auth.go", "patch": "+hardcoded := \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoiYWRtaW4ifQ.dyt0CoTl4WoVjAHI9Q_CqSQ\""}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "jwt-token" for f in findings)
-
-    def test_generic_catches_hex_secret(self):
-        files = [{"filename": "crypto.py", "patch": "+encryption_key = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-hex-secret" for f in findings)
-
-    def test_generic_catches_client_secret(self):
-        files = [{"filename": "oauth.py", "patch": "+client_secret = 'dGhpcyBpcyBhIHJlYWwgc2VjcmV0IGtleQ=='"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-secret" for f in findings)
-
-    def test_generic_catches_connection_string_password(self):
-        files = [{"filename": "db.py", "patch": "+connection_string = 'Server=prod;Database=main;User=admin;Password=r3alP@ss!'"}]
-        findings = scan_diff_secrets(files)
-        assert any(f.rule == "generic-secret" for f in findings)
-
-    # ── Placeholder filtering (no false positives) ────────────────────────
-
-    def test_placeholder_changeme_ignored(self):
-        files = [{"filename": "config.py", "patch": "+password = 'changeme_before_deploy'"}]
-        findings = scan_diff_secrets(files)
-        assert not any(f.rule == "generic-secret" for f in findings)
-
-    def test_placeholder_your_key_ignored(self):
-        files = [{"filename": "config.py", "patch": "+api_key = 'your-api-key-goes-here'"}]
-        findings = scan_diff_secrets(files)
-        assert not any(f.rule == "generic-secret" for f in findings)
-
-    def test_placeholder_env_var_reference_ignored(self):
-        files = [{"filename": "config.py", "patch": "+secret = '${MY_SECRET_FROM_VAULT}'"}]
-        findings = scan_diff_secrets(files)
-        assert not any(f.rule == "generic-secret" for f in findings)
-
-    def test_placeholder_example_ignored(self):
-        files = [{"filename": "docs.py", "patch": "+token = 'example-token-for-documentation'"}]
-        findings = scan_diff_secrets(files)
-        assert not any(f.rule == "generic-secret" for f in findings)
-
-    def test_placeholder_test_token_ignored(self):
-        files = [{"filename": "test.py", "patch": "+api_key = 'test_key_not_real_at_all'"}]
-        findings = scan_diff_secrets(files)
-        assert not any(f.rule == "generic-secret" for f in findings)
-
-    # ── Edge cases ────────────────────────────────────────────────────────
-
-    def test_clean_diff_no_findings(self):
-        files = [{"filename": "main.py", "patch": "+print('hello world')"}]
-        assert scan_diff_secrets(files) == []
-
-    def test_removed_lines_ignored(self):
-        files = [{"filename": "config.py", "patch": "-AWS_KEY = 'AKIAIOSFODNN7EXAMPLE'\n+AWS_KEY = os.environ['AWS_KEY']"}]
-        assert scan_diff_secrets(files) == []
-
-    def test_no_patch_skipped(self):
+    def test_no_patch_skipped(self, tmp_path):
         files = [{"filename": "image.png"}]
-        assert scan_diff_secrets(files) == []
+        assert _write_diff_additions(str(tmp_path), files) is False
 
-    def test_multiple_secrets_same_file(self):
-        patch = "+AKIAIOSFODNN7EXAMPLE\n+-----BEGIN RSA PRIVATE KEY-----"
-        files = [{"filename": "leak.py", "patch": patch}]
-        findings = scan_diff_secrets(files)
-        assert len(findings) >= 2
+    def test_only_removed_lines_skipped(self, tmp_path):
+        files = [{"filename": "a.py", "patch": "-removed = True"}]
+        assert _write_diff_additions(str(tmp_path), files) is False
+
+    def test_nested_directory_created(self, tmp_path):
+        files = [{"filename": "a/b/c/deep.py", "patch": "+x = 1"}]
+        _write_diff_additions(str(tmp_path), files)
+        assert (tmp_path / "a" / "b" / "c" / "deep.py").exists()
+
+    def test_diff_header_stripped(self, tmp_path):
+        files = [{"filename": "main.py", "patch": "+++ b/main.py\n+x = 1"}]
+        _write_diff_additions(str(tmp_path), files)
+        written = (tmp_path / "main.py").read_text()
+        assert "+++" not in written
+        assert "x = 1" in written
 
 
-# ── Secret leak check integration ────────────────────────────────────────────
+# ── run_gitleaks ──────────────────────────────────────────────────────────────
+
+
+def _mock_process(stdout: bytes, returncode: int = 0) -> MagicMock:
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout, b""))
+    proc.kill = MagicMock()
+    return proc
+
+
+_FINDING = {"RuleID": "aws-access-key-id", "Description": "AWS Access Key ID", "File": "config.py", "Secret": "AKIA..."}
+
+
+class TestRunGitleaks:
+
+    async def test_not_installed_returns_none(self):
+        with patch("shutil.which", return_value=None):
+            result = await run_gitleaks([{"filename": "f.py", "patch": "+x=1"}])
+        assert result is None
+
+    async def test_no_added_content_returns_empty(self):
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"):
+            result = await run_gitleaks([{"filename": "image.png"}])
+        assert result == []
+
+    async def test_no_findings_returns_empty(self):
+        proc = _mock_process(b"[]", returncode=0)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "main.py", "patch": "+x = 1"}])
+        assert result == []
+
+    async def test_findings_returned(self):
+        output = json.dumps([_FINDING]).encode()
+        proc = _mock_process(output, returncode=1)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "config.py", "patch": "+AKIAIOSFODNN7EXAMPLE"}])
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["RuleID"] == "aws-access-key-id"
+
+    async def test_file_path_stripped_of_tmpdir_prefix(self):
+        finding_with_abs = dict(_FINDING, File="/tmp/prwarden_xyz/src/config.py")
+        output = json.dumps([finding_with_abs]).encode()
+        proc = _mock_process(output, returncode=1)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "src/config.py", "patch": "+secret=abc123"}])
+        # The temp dir prefix should be stripped, leaving a relative path
+        assert result is not None
+        assert not result[0]["File"].startswith("/tmp")
+
+    async def test_subprocess_error_returns_none(self):
+        proc = _mock_process(b"", returncode=126)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "f.py", "patch": "+x=1"}])
+        assert result is None
+
+    async def test_invalid_json_returns_none(self):
+        proc = _mock_process(b"not valid json", returncode=0)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "f.py", "patch": "+x=1"}])
+        assert result is None
+
+    async def test_null_output_returns_empty(self):
+        proc = _mock_process(b"null", returncode=0)
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "f.py", "patch": "+x=1"}])
+        assert result == []
+
+    async def test_timeout_returns_none(self):
+        proc = MagicMock()
+        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        proc.kill = MagicMock()
+        with patch("shutil.which", return_value="/usr/bin/gitleaks"), \
+             patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await run_gitleaks([{"filename": "f.py", "patch": "+x=1"}])
+        assert result is None
+        proc.kill.assert_called_once()
+
+
+# ── check_secret_leak (reads pre-populated context, no subprocess) ────────────
 
 
 class TestCheckSecretLeak:
 
-    def test_detects_secret(self):
-        files = [{"filename": "config.py", "patch": "+AKIAIOSFODNN7EXAMPLE"}]
-        result = check_secret_leak(_ctx(files=files))
+    def test_gitleaks_not_available(self):
+        result = check_secret_leak(_ctx(gitleaks_findings=None))
+        assert result.passed is True
+        assert "not available" in result.reason
+
+    def test_no_findings(self):
+        result = check_secret_leak(_ctx(gitleaks_findings=[]))
+        assert result.passed is True
+        assert "No secrets detected" in result.reason
+
+    def test_findings_fail(self):
+        result = check_secret_leak(_ctx(gitleaks_findings=[_FINDING]))
         assert result.passed is False
         assert "AWS Access Key ID" in result.reason
+        assert "config.py" in result.reason
 
-    def test_clean(self):
-        files = [{"filename": "main.py", "patch": "+x = 42"}]
-        result = check_secret_leak(_ctx(files=files))
-        assert result.passed is True
+    def test_count_in_reason(self):
+        findings = [dict(_FINDING, File=f"file{i}.py") for i in range(3)]
+        result = check_secret_leak(_ctx(gitleaks_findings=findings))
+        assert "3 secret(s)" in result.reason
+
+    def test_overflow_truncated(self):
+        findings = [dict(_FINDING, File=f"file{i}.py") for i in range(8)]
+        result = check_secret_leak(_ctx(gitleaks_findings=findings))
+        assert "+3 more" in result.reason
 
     def test_disabled(self):
         cfg = parse_config("checks:\n  secret_leak:\n    enabled: false\n")
-        files = [{"filename": "config.py", "patch": "+AKIAIOSFODNN7EXAMPLE"}]
-        assert check_secret_leak(_ctx(files=files, config=cfg)) is None
+        assert check_secret_leak(_ctx(gitleaks_findings=[_FINDING], config=cfg)) is None
 
-    def test_multiple_findings_reported(self):
-        files = [
-            {"filename": "a.py", "patch": "+AKIAIOSFODNN7EXAMPLE"},
-            {"filename": "b.py", "patch": "+-----BEGIN RSA PRIVATE KEY-----"},
-        ]
-        result = check_secret_leak(_ctx(files=files))
+    def test_fallback_to_rule_id_when_no_description(self):
+        finding = {"RuleID": "some-custom-rule", "File": "main.go"}
+        result = check_secret_leak(_ctx(gitleaks_findings=[finding]))
         assert result.passed is False
-        assert "2 secret(s)" in result.reason
+        assert "some-custom-rule" in result.reason
 
 
 # ── CODEOWNERS parsing ────────────────────────────────────────────────────────
@@ -550,6 +559,7 @@ def test_stage2_checks_registered():
     ctx = _ctx(
         files=[{"filename": "src/main.py", "patch": "+x = 1"}],
         repo_tree=tree,
+        gitleaks_findings=[],
     )
     results = run_checks(ctx)
     names = {r.name for r in results}

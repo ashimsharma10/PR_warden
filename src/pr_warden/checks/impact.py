@@ -1,19 +1,28 @@
 """Stage 2: Static change impact analysis (~10s, $0).
 
-Three checks that run alongside Stage 1 deterministic checks:
+Four checks that run alongside Stage 1 deterministic checks:
 
-1. Blast radius   — flags changes to shared/utility files in large repos.
-2. CODEOWNERS     — ensures required code owners are assigned as reviewers.
-3. Secret scanning — hard gate that blocks PRs leaking credentials.
+1. Shared code    — heuristic: flags files in conventionally-shared directories.
+2. Critical path  — deterministic: matches changed files against repo-declared globs.
+3. CODEOWNERS     — ensures required code owners are assigned as reviewers.
+4. Secret scanning — hard gate via gitleaks; falls back gracefully if not installed.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+
+import structlog
 
 from pr_warden.checks.registry import CheckContext, CheckResult, register
+
+log = structlog.get_logger()
 
 # ── Source file detection ─────────────────────────────────────────────────────
 
@@ -23,100 +32,88 @@ _SOURCE_EXT = re.compile(
 )
 
 
-# ── Secret scanning ──────────────────────────────────────────────────────────
-
-_SENSITIVE_VAR = (
-    r"(?:secret|password|passwd|pwd|token|api[_-]?key|apikey|"
-    r"api[_-]?secret|private[_-]?key|access[_-]?key|auth[_-]?token|"
-    r"credentials?|signing[_-]?key|encryption[_-]?key|client[_-]?secret|"
-    r"service[_-]?account[_-]?key|master[_-]?key|bearer[_-]?token|"
-    r"connection[_-]?string|db[_-]?pass|jwt[_-]?secret)"
-)
-
-_SECRET_RULES: list[tuple[str, str, re.Pattern[str]]] = [
-    # ── Platform-specific (high-confidence, zero false positives) ──────────
-    ("aws-access-key-id", "AWS Access Key ID",
-     re.compile(r"AKIA[0-9A-Z]{16}")),
-    ("github-pat", "GitHub Personal Access Token",
-     re.compile(r"ghp_[A-Za-z0-9]{36}")),
-    ("github-oauth", "GitHub OAuth Token",
-     re.compile(r"gho_[A-Za-z0-9]{36}")),
-    ("github-app-token", "GitHub App Token",
-     re.compile(r"ghs_[A-Za-z0-9]{36}")),
-    ("github-fine-pat", "GitHub Fine-Grained PAT",
-     re.compile(r"github_pat_[A-Za-z0-9_]{82}")),
-    ("github-refresh", "GitHub Refresh Token",
-     re.compile(r"ghr_[A-Za-z0-9]{36}")),
-    ("private-key", "Private Key",
-     re.compile(r"-----BEGIN[ A-Z]*PRIVATE KEY-----")),
-    ("slack-bot-token", "Slack Bot Token",
-     re.compile(r"xoxb-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24}")),
-    ("slack-user-token", "Slack User Token",
-     re.compile(r"xoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24}")),
-    ("stripe-live-secret", "Stripe Live Secret Key",
-     re.compile(r"sk_live_[A-Za-z0-9]{24,}")),
-    ("stripe-live-restricted", "Stripe Live Restricted Key",
-     re.compile(r"rk_live_[A-Za-z0-9]{24,}")),
-    ("google-api-key", "Google API Key",
-     re.compile(r"AIza[0-9A-Za-z_-]{35}")),
-    ("db-connection-string", "Database Connection String",
-     re.compile(
-         r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|amqp)://"
-         r"[^:\s]+:[^@\s]+@[^\s'\"]+",
-         re.IGNORECASE,
-     )),
-
-    # ── Generic (catches any platform, any service) ───────────────────────
-    ("generic-secret", "Hardcoded Secret",
-     re.compile(
-         r"(?i)" + _SENSITIVE_VAR + r"""\s*[=:]\s*['"]([^'"]{16,})['"]""",
-     )),
-    ("jwt-token", "JSON Web Token",
-     re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}")),
-    ("generic-hex-secret", "Hex-Encoded Secret",
-     re.compile(
-         r"(?i)" + _SENSITIVE_VAR + r"""\s*[=:]\s*['"]([0-9a-f]{32,})['"]""",
-     )),
-]
-
-_GENERIC_RULE_IDS = frozenset({"generic-secret", "generic-hex-secret"})
-
-_PLACEHOLDER_RE = re.compile(
-    r"(?i)(?:example|changeme|change[_-]me|placeholder|your[_-]|TODO|"
-    r"xxxx|test[_-]?(?:key|token|secret|pass)|dummy|sample|"
-    r"replace[_-]?me|insert[_-]|<[^>]+>|\$\{[^}]+\}|_{8,}|\.{8,}|\*{8,})",
-)
+# ── gitleaks runner ───────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class SecretFinding:
-    file: str
-    rule: str
-    description: str
+async def run_gitleaks(files: list[dict]) -> list[dict] | None:
+    """Scan PR diff additions with gitleaks.
+
+    Writes only the added lines from each patch into a temporary directory,
+    preserving relative file paths for accurate attribution, then delegates
+    all detection logic to gitleaks.
+
+    Returns:
+        None           gitleaks binary not on PATH — scan skipped.
+        []             gitleaks ran, no secrets found.
+        list[dict]     gitleaks ran, one dict per finding (gitleaks JSON schema).
+    """
+    if not shutil.which("gitleaks"):
+        log.warning("gitleaks.not_found", hint="Add gitleaks to PATH to enable secret scanning")
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="prwarden_") as tmpdir:
+        has_content = _write_diff_additions(tmpdir, files)
+        if not has_content:
+            return []
+
+        proc = await asyncio.create_subprocess_exec(
+            "gitleaks", "detect",
+            "--source", tmpdir,
+            "--no-git",
+            "--format", "json",
+            "--log-level", "error",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            log.error("gitleaks.timeout")
+            return None
+
+        # exit 0 = no findings, exit 1 = findings present; anything else is an error
+        if proc.returncode not in (0, 1):
+            log.error("gitleaks.failed", returncode=proc.returncode, stderr=stderr.decode()[:500])
+            return None
+
+        raw = stdout.decode().strip()
+        if not raw or raw == "null":
+            return []
+
+        try:
+            findings = json.loads(raw)
+            # Strip the temp dir prefix from file paths so callers see repo-relative paths
+            for f in findings:
+                if "File" in f:
+                    f["File"] = f["File"].removeprefix(tmpdir).lstrip("/")
+            return findings if isinstance(findings, list) else []
+        except json.JSONDecodeError:
+            log.error("gitleaks.parse_error", output=raw[:200])
+            return None
 
 
-def scan_diff_secrets(files: list[dict]) -> list[SecretFinding]:
-    findings: list[SecretFinding] = []
+def _write_diff_additions(tmpdir: str, files: list[dict]) -> bool:
+    """Write the added lines of each patched file into tmpdir. Returns True if
+    any content was written (i.e. there is something for gitleaks to scan)."""
+    has_content = False
     for f in files:
         patch = f.get("patch", "")
         if not patch:
             continue
-        added_lines = [
+        added = "\n".join(
             line[1:]
             for line in patch.splitlines()
             if line.startswith("+") and not line.startswith("+++")
-        ]
-        text = "\n".join(added_lines)
-        for rule_id, description, pattern in _SECRET_RULES:
-            match = pattern.search(text)
-            if not match:
-                continue
-            if rule_id in _GENERIC_RULE_IDS:
-                value = match.group(1) if match.lastindex else match.group(0)
-                if _PLACEHOLDER_RE.search(value):
-                    continue
-            findings.append(SecretFinding(f["filename"], rule_id, description))
-    return findings
+        )
+        if not added.strip():
+            continue
+        dest = Path(tmpdir) / f["filename"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(added, encoding="utf-8", errors="replace")
+        has_content = True
+    return has_content
 
 
 # ── CODEOWNERS parsing ────────────────────────────────────────────────────────
@@ -341,14 +338,22 @@ def check_secret_leak(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.secret_leak.enabled:
         return None
 
-    findings = scan_diff_secrets(ctx.files)
-    if not findings:
+    if ctx.gitleaks_findings is None:
+        return CheckResult("secret_leak", True, "gitleaks not available — secret scan skipped")
+
+    if not ctx.gitleaks_findings:
         return CheckResult("secret_leak", True, "No secrets detected")
 
-    seen: list[str] = []
-    for f in findings:
-        seen.append(f"{f.description} in {f.file}")
+    descriptions = [
+        "{} in {}".format(
+            f.get("Description") or f.get("RuleID", "Secret"),
+            f.get("File", "unknown"),
+        )
+        for f in ctx.gitleaks_findings
+    ]
+    summary = "; ".join(descriptions[:5])
+    overflow = f" (+{len(ctx.gitleaks_findings) - 5} more)" if len(ctx.gitleaks_findings) > 5 else ""
     return CheckResult(
         "secret_leak", False,
-        f"{len(findings)} secret(s) detected: {'; '.join(seen[:5])}",
+        f"{len(ctx.gitleaks_findings)} secret(s) detected: {summary}{overflow}",
     )
