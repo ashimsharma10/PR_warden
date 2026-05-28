@@ -18,6 +18,8 @@ class CheckContext:
     files: list[dict] = field(default_factory=list)    # GET /pulls/{n}/files
     commits: list[dict] = field(default_factory=list)  # GET /pulls/{n}/commits
     config: RepoConfig = field(default_factory=lambda: DEFAULT_CONFIG)
+    repo_tree: list[str] = field(default_factory=list)
+    codeowners_raw: str | None = None
 
 
 # A check returns None when disabled by config; otherwise a CheckResult.

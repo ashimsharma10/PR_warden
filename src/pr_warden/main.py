@@ -71,9 +71,12 @@ async def _load_repo_config(token: str, repo: str) -> RepoConfig:
 async def _build_check_context(
     token: str, repo: str, event: PullRequestEvent, config: RepoConfig
 ) -> CheckContext:
-    files, commits = await asyncio.gather(
+    base_branch = event.pull_request.base.ref
+    files, commits, repo_tree, codeowners = await asyncio.gather(
         client.list_pr_files(token, repo, event.number),
         client.list_pr_commits(token, repo, event.number),
+        client.list_repo_tree(token, repo, base_branch),
+        client.get_codeowners(token, repo),
         return_exceptions=True,
     )
     return CheckContext(
@@ -81,6 +84,8 @@ async def _build_check_context(
         files=files if isinstance(files, list) else [],
         commits=commits if isinstance(commits, list) else [],
         config=config,
+        repo_tree=repo_tree if isinstance(repo_tree, list) else [],
+        codeowners_raw=codeowners if isinstance(codeowners, str) else None,
     )
 
 

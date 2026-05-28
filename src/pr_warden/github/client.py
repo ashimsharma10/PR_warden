@@ -139,6 +139,26 @@ async def remove_label(token: str, repo: str, pr_number: int, label: str) -> Non
         r.raise_for_status()
 
 
+async def list_repo_tree(token: str, repo: str, branch: str = "HEAD") -> list[str]:
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/git/trees/{branch}",
+        headers=_headers(token),
+        params={"recursive": "1"},
+    )
+    if r.status_code == 409:
+        return []
+    r.raise_for_status()
+    return [item["path"] for item in r.json().get("tree", []) if item["type"] == "blob"]
+
+
+async def get_codeowners(token: str, repo: str) -> str | None:
+    for path in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+        content = await get_repo_file(token, repo, path)
+        if content is not None:
+            return content
+    return None
+
+
 async def close_pull_request(token: str, repo: str, pr_number: int) -> None:
     r = await _client.patch(
         f"{GH_API}/repos/{repo}/pulls/{pr_number}",

@@ -57,6 +57,43 @@ class NoTestsConfig(CheckToggle):
     exempt_paths: list[str] = []   # glob patterns; files matching skip the check
 
 
+class SharedCodeConfig(CheckToggle):
+    """Heuristic: flags source files in conventionally-shared directories.
+
+    This is a naming heuristic, not a dependency graph. It tells reviewers
+    "this file lives in a shared directory — extra scrutiny may be warranted."
+    Use critical_path for deterministic coverage of high-risk areas.
+    """
+    shared_paths: list[str] = [
+        "utils", "lib", "shared", "common", "core", "helpers", "base", "pkg",
+    ]
+
+
+class CriticalPathConfig(CheckToggle):
+    """Deterministic critical-path coverage via repo-declared globs.
+
+    List paths that are always high-risk in this repository. Any PR that
+    touches a matching file is flagged immediately, with zero infrastructure.
+
+    Example:
+        globs:
+          - "auth/**"
+          - "payments/**"
+          - "migrations/**"
+          - "*.tf"
+          - ".github/workflows/**"
+    """
+    globs: list[str] = []
+
+
+class CodeownersConfig(CheckToggle):
+    require_review: bool = True
+
+
+class SecretLeakConfig(CheckToggle):
+    pass
+
+
 # ── Root config ────────────────────────────────────────────────────────────────
 
 
@@ -77,6 +114,10 @@ class ChecksConfig(BaseModel):
     test_assertions_weakened: CheckToggle = CheckToggle()
     empty_function_bodies: CheckToggle = CheckToggle()
     dependency_only_churn: CheckToggle = CheckToggle()
+    shared_code: SharedCodeConfig = SharedCodeConfig()
+    critical_path: CriticalPathConfig = CriticalPathConfig()
+    codeowners: CodeownersConfig = CodeownersConfig()
+    secret_leak: SecretLeakConfig = SecretLeakConfig()
 
 
 class RepoConfig(BaseModel):
