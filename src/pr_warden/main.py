@@ -1,6 +1,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import structlog
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
@@ -18,6 +19,7 @@ from pr_warden.github.schemas import PullRequestEvent
 from pr_warden.github.webhooks import verify_signature
 from pr_warden.models import PRCheck, Repo
 from pr_warden.repo_config import CONFIG_PATH, DEFAULT_CONFIG, RepoConfig, parse_config
+from pr_warden.summarizer import format_summary, summarize_pr
 
 log = structlog.get_logger()
 
@@ -97,6 +99,38 @@ async def _build_check_context(
     )
 
 
+async def _today_cost(session: AsyncSession) -> float:
+    """Total summarizer spend (USD) since 00:00 UTC today."""
+    since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    total = await session.scalar(
+        select(func.coalesce(func.sum(PRCheck.cost_usd), 0.0)).where(
+            PRCheck.created_at >= since
+        )
+    )
+    return float(total or 0.0)
+
+
+async def _maybe_summarize(session: AsyncSession, ctx: CheckContext):
+    """Run the LLM summarizer if configured and under the daily cost ceiling.
+
+    Returns a PRSummary or None. Never raises — a missing key, budget cap, or
+    model failure just means the comment ships with the deterministic table only.
+    """
+    if not settings.anthropic_api_key:
+        return None
+
+    spent = await _today_cost(session)
+    if spent >= settings.daily_cost_limit_usd:
+        log.warning("summarizer.budget_exhausted", spent_usd=round(spent, 4))
+        return None
+
+    return await summarize_pr(
+        ctx,
+        api_key=settings.anthropic_api_key,
+        model=settings.summarizer_model,
+    )
+
+
 async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
     structlog.contextvars.bind_contextvars(
         trace_id=trace_id,
@@ -112,12 +146,15 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         config = await _load_repo_config(token, repo)
         ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
-        comment_body = build_comment(results)
         label = pick_label(results)
 
         async with async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
             repo_row.cached_config = config.model_dump()
+
+            summary = await _maybe_summarize(session, ctx)
+            summary_md = format_summary(summary) if summary else None
+            comment_body = build_comment(results, summary=summary_md)
 
             existing_comment_id = await session.scalar(
                 select(PRCheck.comment_id)
@@ -145,6 +182,8 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                     check_results={
                         r.name: {"passed": r.passed, "reason": r.reason} for r in results
                     },
+                    summary=summary.summary if summary else None,
+                    cost_usd=summary.cost_usd if summary else None,
                     action_taken=label,
                     comment_id=comment_id,
                 )
