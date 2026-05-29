@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
 
+    # Cheap model by default; the summarizer will later be split into several
+    # smaller agents that can each pick their own model.
+    summarizer_model: str = "claude-3-5-haiku-latest"
+
     summarizer_max_cost_usd: float = 0.10
     daily_cost_limit_usd: float = 5.00
 
