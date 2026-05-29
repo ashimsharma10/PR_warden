@@ -45,23 +45,3 @@ class PullRequestEvent(BaseModel):
     repository: Repository
     sender: GitHubUser
     installation: Installation
-
-
-class Comment(BaseModel):
-    id: int
-    body: str
-    user: GitHubUser
-
-
-class Issue(BaseModel):
-    number: int
-    pull_request: dict | None = None  # present when comment is on a PR
-
-
-class IssueCommentEvent(BaseModel):
-    action: str
-    comment: Comment
-    issue: Issue
-    repository: Repository
-    sender: GitHubUser
-    installation: Installation

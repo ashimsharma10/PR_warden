@@ -20,15 +20,6 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
-async def get_pull_request(token: str, repo: str, pr_number: int) -> dict:
-    r = await _client.get(
-        f"{GH_API}/repos/{repo}/pulls/{pr_number}",
-        headers=_headers(token),
-    )
-    r.raise_for_status()
-    return r.json()
-
-
 async def get_repo_file(token: str, repo: str, path: str) -> str | None:
     """Fetch a file's raw contents at the repo's default branch.
 
@@ -157,12 +148,3 @@ async def get_codeowners(token: str, repo: str) -> str | None:
         if content is not None:
             return content
     return None
-
-
-async def close_pull_request(token: str, repo: str, pr_number: int) -> None:
-    r = await _client.patch(
-        f"{GH_API}/repos/{repo}/pulls/{pr_number}",
-        headers=_headers(token),
-        json={"state": "closed"},
-    )
-    r.raise_for_status()
