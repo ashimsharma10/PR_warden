@@ -21,7 +21,7 @@ import re
 
 from pr_warden.agent.context import PRContext
 from pr_warden.agent.schemas import ToolInput, ToolResult
-from pr_warden.github import client
+from pr_warden.agent.tools._repo_files import fetch_repo_files_at_head
 
 _MAX_FILES = 60          # text files fetched per call
 _MAX_RESULTS = 100       # hard cap on hits returned
@@ -58,24 +58,24 @@ def search_in_source(
 
 
 def _scan_files(
-    capped: list[str],
-    contents: list,
+    fetched: list[tuple[str, str]],
     matcher: re.Pattern[str],
     limit: int,
 ) -> tuple[list[str], int, bool]:
-    """Synchronous scan over fetched files. Returns (hits, files_with_hits, capped).
+    """Synchronous scan over fetched (path, content) files.
 
-    Runs on a worker thread (see `run`): regex matching is CPU-bound with no
-    await points, so doing it on the event loop would block every other request
-    and make the loop's per-tool timeout impossible to honour — a
-    catastrophic-backtracking pattern from the model would freeze the server.
-    Off-thread, the timeout fires and the service stays responsive.
+    Returns (hits, files_with_hits, capped). Runs on a worker thread (see
+    `run`): regex matching is CPU-bound with no await points, so doing it on the
+    event loop would block every other request and make the loop's per-tool
+    timeout impossible to honour — a catastrophic-backtracking pattern from the
+    model would freeze the server. Off-thread, the timeout fires and the service
+    stays responsive.
     """
     hits: list[str] = []
     files_with_hits = 0
     capped_results = False
-    for path, content in zip(capped, contents):
-        if not isinstance(content, str) or len(content) > _MAX_FILE_BYTES:
+    for path, content in fetched:
+        if len(content) > _MAX_FILE_BYTES:
             continue
         found = search_in_source(content, matcher, path)
         if not found:
@@ -133,34 +133,27 @@ you want literal/regex matching. Scans a bounded number of files."""
             _fnmatch_to_regex(input.file_pattern) if input.file_pattern else None
         )
 
-        tree = await client.list_repo_tree(ctx.token, ctx.repo, ctx.head_sha)
-        candidates = [
-            p
-            for p in tree
-            if not p.endswith(_SKIP_SUFFIXES)
-            and (path_filter is None or path_filter.match(p))
-        ]
-        capped = candidates[:_MAX_FILES]
+        def match(p: str) -> bool:
+            return not p.endswith(_SKIP_SUFFIXES) and (
+                path_filter is None or path_filter.match(p) is not None
+            )
 
-        contents = await asyncio.gather(
-            *(
-                client.get_repo_file(ctx.token, ctx.repo, p, ref=ctx.head_sha)
-                for p in capped
-            ),
-            return_exceptions=True,
+        fetched, total_candidates = await fetch_repo_files_at_head(
+            ctx, match=match, max_files=_MAX_FILES
         )
+        scanned = min(_MAX_FILES, total_candidates)
 
         limit = max(1, min(input.max_results, _MAX_RESULTS))
         # Scan off the event loop: see _scan_files. Keeps the server responsive
         # and lets the loop's per-tool timeout cancel a pathological pattern.
         hits, files_with_hits, capped_results = await asyncio.to_thread(
-            _scan_files, capped, list(contents), pattern, limit
+            _scan_files, fetched, pattern, limit
         )
 
         if not hits:
             return ToolResult(
                 ok=True,
-                content=f"No matches for '{input.query}' in {len(capped)} files.",
+                content=f"No matches for '{input.query}' in {scanned} files.",
             )
 
         footer = ""
@@ -169,9 +162,9 @@ you want literal/regex matching. Scans a bounded number of files."""
                 f"\n[results capped at {limit}; refine the query or file_pattern "
                 "to narrow — there may be more]"
             )
-        elif len(candidates) > _MAX_FILES:
+        elif total_candidates > _MAX_FILES:
             footer = (
-                f"\n[scanned first {_MAX_FILES} of {len(candidates)} files; "
+                f"\n[scanned first {_MAX_FILES} of {total_candidates} files; "
                 "narrow with file_pattern for fuller coverage]"
             )
         return ToolResult(
@@ -180,7 +173,7 @@ you want literal/regex matching. Scans a bounded number of files."""
             metadata={
                 "hits": len(hits),
                 "files_with_hits": files_with_hits,
-                "files_scanned": len(capped),
-                "total_candidates": len(candidates),
+                "files_scanned": scanned,
+                "total_candidates": total_candidates,
             },
         )

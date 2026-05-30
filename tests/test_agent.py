@@ -696,6 +696,27 @@ async def test_search_code_caps_results(monkeypatch):
     assert "capped at 5" in res.content
 
 
+async def test_fetch_repo_files_at_head_skips_errors_and_counts_total(monkeypatch):
+    from pr_warden.agent.tools._repo_files import fetch_repo_files_at_head
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["a.py", "b.py", "c.md"]
+
+    async def fake_file(token, repo, path, ref=None):
+        if path == "b.py":
+            raise RuntimeError("fetch failed")
+        return f"# {path}"
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    fetched, total = await fetch_repo_files_at_head(
+        _ctx(), match=lambda p: p.endswith(".py"), max_files=10
+    )
+    assert total == 2                     # a.py + b.py match (c.md excluded)
+    assert fetched == [("a.py", "# a.py")]  # b.py's fetch error is skipped
+
+
 async def test_search_code_skips_oversized_file(monkeypatch):
     from pr_warden.agent.tools import search_code as sc
     from pr_warden.github import client

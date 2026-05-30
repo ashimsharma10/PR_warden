@@ -10,11 +10,10 @@ reason to prefer this over a text search.
 from __future__ import annotations
 
 import ast
-import asyncio
 
 from pr_warden.agent.context import PRContext
 from pr_warden.agent.schemas import ToolInput, ToolResult
-from pr_warden.github import client
+from pr_warden.agent.tools._repo_files import fetch_repo_files_at_head
 
 _MAX_FILES = 40
 
@@ -54,36 +53,27 @@ comments and strings. Python-only; scans a bounded number of files."""
     input_schema = FindReferencesInput
 
     async def run(self, ctx: PRContext, input: FindReferencesInput) -> ToolResult:
-        tree = await client.list_repo_tree(ctx.token, ctx.repo, ctx.head_sha)
-        py_files = [p for p in tree if p.endswith(".py")]
-        capped = py_files[:_MAX_FILES]
-
-        contents = await asyncio.gather(
-            *(
-                client.get_repo_file(ctx.token, ctx.repo, p, ref=ctx.head_sha)
-                for p in capped
-            ),
-            return_exceptions=True,
+        fetched, total = await fetch_repo_files_at_head(
+            ctx, match=lambda p: p.endswith(".py"), max_files=_MAX_FILES
         )
+        scanned = min(_MAX_FILES, total)
 
         hits: list[str] = []
-        for path, content in zip(capped, contents):
-            if not isinstance(content, str):
-                continue
+        for path, content in fetched:
             for line in find_symbol_refs(content, input.symbol):
                 hits.append(f"{path}:{line}")
 
         if not hits:
             return ToolResult(
                 ok=True,
-                content=f"No references to '{input.symbol}' found in {len(capped)} Python files.",
+                content=f"No references to '{input.symbol}' found in {scanned} Python files.",
             )
 
         footer = ""
-        if len(py_files) > _MAX_FILES:
-            footer = f"\n[scanned first {_MAX_FILES} of {len(py_files)} Python files]"
+        if total > _MAX_FILES:
+            footer = f"\n[scanned first {_MAX_FILES} of {total} Python files]"
         return ToolResult(
             ok=True,
             content="\n".join(hits) + footer,
-            metadata={"files_scanned": len(capped), "total_py_files": len(py_files)},
+            metadata={"files_scanned": scanned, "total_py_files": total},
         )
