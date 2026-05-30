@@ -12,6 +12,7 @@ from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
 from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
+from pr_warden.agent.tools.git_blame import GitBlameTool, _range_for_line
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 
 
@@ -101,6 +102,7 @@ def test_build_tools_includes_done():
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
+        "git_blame",
     } <= names
 
 

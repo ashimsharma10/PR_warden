@@ -1,5 +1,26 @@
+from pr_warden.agent.schemas import DoneInput
 from pr_warden.checks.registry import CheckResult
-from pr_warden.composer import LABEL_CLEAN, LABEL_NEEDS_ATTENTION, build_comment, pick_label
+from pr_warden.composer import (
+    LABEL_CLEAN,
+    LABEL_NEEDS_ATTENTION,
+    build_comment,
+    format_agent_assessment,
+    pick_label,
+)
+
+
+def _assessment(**kwargs) -> DoneInput:
+    defaults = dict(
+        summary="Guards the charge behind an already_charged check.",
+        files_touched=["payments.py"],
+        intent_matches_diff=True,
+        intent_mismatch_reason="",
+        notable=["No test added for the retry path"],
+        open_questions=[],
+        confidence=0.8,
+    )
+    defaults.update(kwargs)
+    return DoneInput(**defaults)
 
 
 def test_comment_contains_header():
@@ -51,6 +72,34 @@ def test_comment_includes_summary():
 def test_comment_footer():
     comment = build_comment([CheckResult("a", True, "")])
     assert "/prwarden recheck" in comment
+
+
+def test_comment_includes_agent_section():
+    results = [CheckResult("title_quality", True, "")]
+    comment = build_comment(results, agent=_assessment())
+    assert "### Agent Review" in comment
+    assert "Guards the charge" in comment
+    assert "No test added for the retry path" in comment
+    assert "Confidence: 80%" in comment
+
+
+def test_comment_no_agent_section_when_absent():
+    comment = build_comment([CheckResult("a", True, "")])
+    assert "### Agent Review" not in comment
+
+
+def test_format_agent_assessment_flags_intent_mismatch():
+    out = format_agent_assessment(
+        _assessment(intent_matches_diff=False, intent_mismatch_reason="Adds telemetry, not a fix")
+    )
+    assert "Intent vs. diff mismatch" in out
+    assert "Adds telemetry, not a fix" in out
+
+
+def test_format_agent_assessment_renders_open_questions():
+    out = format_agent_assessment(_assessment(open_questions=["Is the lock released on error?"]))
+    assert "Open questions" in out
+    assert "Is the lock released on error?" in out
 
 
 def test_pick_label_all_pass():
