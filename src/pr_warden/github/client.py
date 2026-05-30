@@ -20,19 +20,75 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
-async def get_repo_file(token: str, repo: str, path: str) -> str | None:
-    """Fetch a file's raw contents at the repo's default branch.
+async def get_repo_file(
+    token: str, repo: str, path: str, ref: str | None = None
+) -> str | None:
+    """Fetch a file's raw contents.
 
-    Returns None if the file does not exist (404). Other errors raise.
+    With `ref` (a branch, tag, or commit SHA) the file is read at that point;
+    without it, GitHub serves the repo's default branch. Returns None if the
+    file does not exist (404). Other errors raise.
     """
     r = await _client.get(
         f"{GH_API}/repos/{repo}/contents/{path}",
         headers={**_headers(token), "Accept": "application/vnd.github.raw"},
+        params={"ref": ref} if ref else None,
     )
     if r.status_code == 404:
         return None
     r.raise_for_status()
     return r.text
+
+
+async def get_issue(token: str, repo: str, number: int) -> dict | None:
+    """Fetch an issue (or PR, which GitHub also exposes here) by number.
+
+    Returns None if it does not exist (404). Other errors raise.
+    """
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/issues/{number}",
+        headers=_headers(token),
+    )
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json()
+
+
+async def search_author_prs(
+    token: str, repo: str, author: str, limit: int = 10
+) -> list[dict]:
+    """Return the author's most recent PRs on this repo (newest first).
+
+    Uses the search API; each item carries `state` and, for merged PRs, a
+    `pull_request.merged_at` timestamp that distinguishes merged from closed.
+    """
+    r = await _client.get(
+        f"{GH_API}/search/issues",
+        headers=_headers(token),
+        params={
+            "q": f"repo:{repo} type:pr author:{author}",
+            "sort": "created",
+            "order": "desc",
+            "per_page": limit,
+        },
+    )
+    r.raise_for_status()
+    items: list[dict] = r.json().get("items", [])
+    return items
+
+
+async def list_issue_comments(
+    token: str, repo: str, number: int, limit: int = 10
+) -> list[dict]:
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/issues/{number}/comments",
+        headers=_headers(token),
+        params={"per_page": limit},
+    )
+    r.raise_for_status()
+    comments: list[dict] = r.json()
+    return comments
 
 
 async def list_pr_commits(token: str, repo: str, pr_number: int) -> list[dict]:

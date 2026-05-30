@@ -20,6 +20,7 @@ _PRICING: list[tuple[str, tuple[float, float]]] = [
     ("claude-3-5-haiku", (0.80, 4.00)),
     ("claude-haiku-4", (1.00, 5.00)),
     ("claude-3-haiku", (0.25, 1.25)),
+    ("claude-sonnet-4", (3.00, 15.00)),
 ]
 _DEFAULT_PRICING = (0.80, 4.00)  # fall back to 3.5-haiku pricing
 
@@ -46,7 +47,7 @@ class LLMResult:
 _clients: dict[str, AsyncAnthropic] = {}
 
 
-def _get_client(api_key: str) -> AsyncAnthropic:
+def get_client(api_key: str) -> AsyncAnthropic:
     client = _clients.get(api_key)
     if client is None:
         client = AsyncAnthropic(api_key=api_key)
@@ -64,7 +65,7 @@ async def call_model(
 ) -> LLMResult:
     """Single-turn completion. Raises on transport/API errors — callers decide
     how to degrade (the summarizer treats any failure as 'no summary')."""
-    client = _get_client(api_key)
+    client = get_client(api_key)
     resp = await client.messages.create(
         model=model,
         max_tokens=max_tokens,
