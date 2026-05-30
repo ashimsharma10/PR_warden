@@ -1,0 +1,32 @@
+"""The termination tool.
+
+Instead of parsing prose to guess "is the agent finished," the agent signals
+completion by calling `done` with its structured assessment. The loop sees the
+tool name and stops; the assessment IS the tool-call arguments. This tool has
+no `run` — the loop intercepts `done` before tool execution.
+"""
+
+from __future__ import annotations
+
+from pr_warden.agent.schemas import DoneInput, ToolResult
+
+
+class DoneTool:
+    name = "done"
+    description = """Signal that you have enough information to produce your final
+assessment. Call this with your structured output. After this is called, no more
+tools will be invoked.
+
+Only call this when:
+- You understand what the PR does
+- You've checked the linked issue (if any) actually relates
+- You've identified anything notable for the reviewer
+
+If you're uncertain about something, put it in `open_questions` rather than
+skipping it."""
+    input_schema = DoneInput
+
+    async def run(self, ctx, input: DoneInput) -> ToolResult:  # pragma: no cover
+        # The loop intercepts `done` and never calls this; present only so the
+        # tool satisfies the Tool protocol.
+        return ToolResult(ok=True, content="done")
