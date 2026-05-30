@@ -636,6 +636,12 @@ def test_excluded_rules_override(monkeypatch):
     assert sec.excluded_rules() == ("only-this",)
 
 
+def test_excluded_rules_sentinel_disables(monkeypatch):
+    for sentinel in ("none", "OFF", "-"):
+        monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", sentinel)
+        assert sec.excluded_rules() == ()  # default exclusions turned off
+
+
 async def test_security_tool_drops_excluded_finding_end_to_end(monkeypatch):
     from pr_warden.github import client
 

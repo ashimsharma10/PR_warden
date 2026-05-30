@@ -82,12 +82,24 @@ def semgrep_configs() -> tuple[str, ...]:
     return _split_csv(settings.semgrep_configs) or _DEFAULT_SEMGREP_CONFIGS
 
 
+# Sentinels for SEMGREP_EXCLUDE_RULES that mean "exclude nothing" — lets an
+# operator turn OFF the default exclusions (e.g. when auditing a security-
+# sensitive repo where pickle/exec/eval matter). Empty string keeps defaults.
+_NO_EXCLUSIONS = {"none", "off", "-"}
+
+
 def excluded_rules() -> tuple[str, ...]:
-    """Rule-id substrings to drop: SEMGREP_EXCLUDE_RULES override, else defaults."""
+    """Rule-id substrings to drop: SEMGREP_EXCLUDE_RULES override, else defaults.
+
+    Unset/empty → the curated defaults; a sentinel ("none"/"off"/"-") → no
+    exclusions; anything else → exactly that list.
+    """
     override = settings.semgrep_exclude_rules.strip()
-    if override:
-        return _split_csv(settings.semgrep_exclude_rules)
-    return _DEFAULT_EXCLUDED_RULES
+    if not override:
+        return _DEFAULT_EXCLUDED_RULES
+    if override.lower() in _NO_EXCLUSIONS:
+        return ()
+    return _split_csv(settings.semgrep_exclude_rules)
 
 
 def drop_excluded_rules(findings: list[dict], excluded: tuple[str, ...]) -> list[dict]:
