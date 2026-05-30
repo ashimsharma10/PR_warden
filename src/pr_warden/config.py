@@ -25,8 +25,28 @@ class Settings(BaseSettings):
     summarizer_max_cost_usd: float = 0.10
     daily_cost_limit_usd: float = 5.00
 
+    # ── Semgrep ruleset (check_security_patterns) ───────────────────────────
+    # Comma-separated overrides; empty → the tool's curated defaults. Lets
+    # operators retune packs/exclusions without a code change.
+    semgrep_configs: str = ""
+    semgrep_exclude_rules: str = ""
+    # ── Tool-using review agent (off by default) ────────────────────────────
+    # Comma-separated "owner/name" allowlist. Empty → the agent never runs, so
+    # deploying this code changes nothing in prod until a repo is flipped on.
+    agent_review_repos: str = ""
+    agent_model: str = "claude-sonnet-4-6"
+    # Wall-clock cap for a single agent run on the live path. The loop also
+    # bounds tokens and tool calls internally; this guards against a slow run
+    # holding up the webhook handler.
+    agent_timeout_s: float = 90.0
+
     stats_bearer_token: str = ""
     bot_owner_username: str = ""
+
+    def agent_enabled_for(self, repo: str) -> bool:
+        """True if the review agent is allowlisted for `repo` ("owner/name")."""
+        allowed = {r.strip() for r in self.agent_review_repos.split(",") if r.strip()}
+        return repo in allowed
 
     def private_key(self) -> str:
         path = Path(self.github_app_private_key_path)

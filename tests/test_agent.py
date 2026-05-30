@@ -12,7 +12,7 @@ from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
 from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
-from pr_warden.agent.tools.search_code import SearchCodeTool, search_in_source
+from pr_warden.agent.tools.git_blame import GitBlameTool, _range_for_line
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 
 
@@ -102,7 +102,7 @@ def test_build_tools_includes_done():
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
-        "search_code",
+        "git_blame",
     } <= names
 
 
@@ -594,147 +594,134 @@ def test_security_tool_has_extended_timeout():
     assert sec.CheckSecurityPatternsTool.timeout_s > 15
 
 
-# ── search_code ──────────────────────────────────────────────────────────────
+# ── semgrep ruleset tuning (issue #9) ────────────────────────────────────────
 
-def test_search_in_source_literal():
-    import re
-
-    src = "import os\nlogin()\n# login mention\n"
-    matcher = re.compile(re.escape("login"))
-    hits = search_in_source(src, matcher, "a.py")
-    assert hits == ["a.py:2: login()", "a.py:3: # login mention"]  # text match incl. comments
+def test_default_configs_include_owasp_and_cwe():
+    cfgs = sec._DEFAULT_SEMGREP_CONFIGS
+    assert "p/security-audit" in cfgs and "p/secrets" in cfgs
+    assert "p/owasp-top-ten" in cfgs and "p/cwe-top-25" in cfgs
 
 
-def test_search_in_source_truncates_long_lines():
-    import re
-
-    src = "x" + "y" * 500 + "\n"
-    hits = search_in_source(src, re.compile("x"), "a.py")
-    assert hits[0].endswith("…") and len(hits[0]) < 260
+def test_default_excludes_presence_detectors():
+    # The three high-noise audit rules measured against the audited-library corpus.
+    assert {"avoid-pickle", "exec-detected", "eval-detected"} <= set(sec._DEFAULT_EXCLUDED_RULES)
 
 
-async def test_search_code_literal(monkeypatch):
+def test_drop_excluded_rules_filters_by_substring():
+    findings = [
+        {"check_id": "python.lang.security.deserialization.pickle.avoid-pickle"},
+        {"check_id": "python.lang.security.audit.exec-detected.exec-detected"},
+        {"check_id": "python.lang.security.audit.subprocess-shell-true"},  # keep
+    ]
+    kept = sec.drop_excluded_rules(findings, ("avoid-pickle", "exec-detected"))
+    assert len(kept) == 1
+    assert kept[0]["check_id"].endswith("subprocess-shell-true")
+
+
+def test_drop_excluded_rules_empty_exclusions_is_passthrough():
+    findings = [{"check_id": "x.avoid-pickle"}]
+    assert sec.drop_excluded_rules(findings, ()) == findings
+
+
+def test_semgrep_configs_uses_default_when_unset(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "")
+    assert sec.semgrep_configs() == sec._DEFAULT_SEMGREP_CONFIGS
+
+
+def test_semgrep_configs_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "p/foo, p/bar")
+    assert sec.semgrep_configs() == ("p/foo", "p/bar")
+
+
+def test_excluded_rules_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", "only-this")
+    assert sec.excluded_rules() == ("only-this",)
+
+
+def test_excluded_rules_sentinel_disables(monkeypatch):
+    for sentinel in ("none", "OFF", "-"):
+        monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", sentinel)
+        assert sec.excluded_rules() == ()  # default exclusions turned off
+
+
+async def test_security_tool_drops_excluded_finding_end_to_end(monkeypatch):
     from pr_warden.github import client
 
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["a.py", "b.py", "logo.png"]
-
-    files = {"a.py": "do_login()\n", "b.py": "x = 1\nDO_LOGIN = 2\n"}
+    files = [{"filename": "a.py", "status": "modified", "additions": 1,
+              "deletions": 0, "patch": "@@ -1 +1,2 @@\n ctx\n+import pickle"}]
+    ctx = _ctx(files=files)
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
 
     async def fake_file(token, repo, path, ref=None):
-        return files.get(path)
+        return "x\n" * 10
 
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    async def fake_semgrep(contents, **kwargs):
+        # An excluded presence-detector finding ON a changed line — must be dropped
+        # before the changed-line filter ever sees it.
+        return [{"check_id": "python.lang.security.deserialization.pickle.avoid-pickle",
+                 "path": "a.py", "start": {"line": 2}, "end": {"line": 2},
+                 "extra": {"severity": "WARNING", "message": "pickle", "lines": "import pickle"}}]
+
     monkeypatch.setattr(client, "get_repo_file", fake_file)
-    res = await SearchCodeTool().run(_ctx(), SearchCodeTool.input_schema(query="login"))
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
     assert res.ok
-    assert "a.py:1: do_login()" in res.content
-    assert "b.py:2:" in res.content        # case-insensitive literal match
-    assert "logo.png" not in res.content   # binary suffix skipped
+    assert "[HIGH]" not in res.content and "[MEDIUM]" not in res.content
+    assert "no findings" in res.content.lower()
 
 
-async def test_search_code_regex_and_file_pattern(monkeypatch):
-    from pr_warden.github import client
+class _FakeProc:
+    """Stands in for an asyncio subprocess; records kill()."""
+    def __init__(self, communicate):
+        self.returncode = None
+        self._communicate = communicate
+        self.kills = 0
 
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["a.py", "notes.md"]
+    async def communicate(self):
+        return await self._communicate()
 
-    files = {"a.py": "TODO: fix\nfoo123bar\n", "notes.md": "TODO: docs\n"}
-
-    async def fake_file(token, repo, path, ref=None):
-        return files.get(path)
-
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
-    monkeypatch.setattr(client, "get_repo_file", fake_file)
-    res = await SearchCodeTool().run(
-        _ctx(),
-        SearchCodeTool.input_schema(query=r"\d{3}", is_regex=True, file_pattern="*.py"),
-    )
-    assert res.ok
-    assert "foo123bar" in res.content
-    assert "notes.md" not in res.content   # filtered out by file_pattern
+    def kill(self):
+        self.kills += 1
+        self.returncode = -9
 
 
-async def test_search_code_bad_regex():
-    res = await SearchCodeTool().run(
-        _ctx(), SearchCodeTool.input_schema(query="(", is_regex=True)
-    )
-    assert not res.ok and res.error == "bad_regex"
+async def test_run_semgrep_kills_proc_on_timeout(monkeypatch):
+    import asyncio as aio
+
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def hang():
+        await aio.sleep(10)
+        return (b"", b"")
+
+    proc = _FakeProc(hang)
+
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    res = await sec.run_semgrep({"a.py": "x"}, timeout=0.01)
+    assert res is None
+    assert proc.kills == 1  # finally killed the timed-out scan
 
 
-async def test_search_code_no_matches(monkeypatch):
-    from pr_warden.github import client
+async def test_run_semgrep_kills_proc_on_cancel(monkeypatch):
+    import asyncio as aio
 
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["a.py"]
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
 
-    async def fake_file(token, repo, path, ref=None):
-        return "x = 1\n"
+    async def cancelled():
+        raise aio.CancelledError()
 
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
-    monkeypatch.setattr(client, "get_repo_file", fake_file)
-    res = await SearchCodeTool().run(_ctx(), SearchCodeTool.input_schema(query="zzz"))
-    assert res.ok and "No matches" in res.content
+    proc = _FakeProc(cancelled)
 
+    async def fake_exec(*a, **k):
+        return proc
 
-async def test_search_code_caps_results(monkeypatch):
-    from pr_warden.github import client
-
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["a.py"]
-
-    async def fake_file(token, repo, path, ref=None):
-        return "\n".join("hit" for _ in range(50))
-
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
-    monkeypatch.setattr(client, "get_repo_file", fake_file)
-    res = await SearchCodeTool().run(
-        _ctx(), SearchCodeTool.input_schema(query="hit", max_results=5)
-    )
-    assert res.ok
-    assert res.metadata["hits"] == 5
-    assert "capped at 5" in res.content
-
-
-async def test_fetch_repo_files_at_head_skips_errors_and_counts_total(monkeypatch):
-    from pr_warden.agent.tools._repo_files import fetch_repo_files_at_head
-    from pr_warden.github import client
-
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["a.py", "b.py", "c.md"]
-
-    async def fake_file(token, repo, path, ref=None):
-        if path == "b.py":
-            raise RuntimeError("fetch failed")
-        return f"# {path}"
-
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
-    monkeypatch.setattr(client, "get_repo_file", fake_file)
-    fetched, total = await fetch_repo_files_at_head(
-        _ctx(), match=lambda p: p.endswith(".py"), max_files=10
-    )
-    assert total == 2                     # a.py + b.py match (c.md excluded)
-    assert fetched == [("a.py", "# a.py")]  # b.py's fetch error is skipped
-
-
-async def test_search_code_skips_oversized_file(monkeypatch):
-    from pr_warden.agent.tools import search_code as sc
-    from pr_warden.github import client
-
-    async def fake_tree(token, repo, branch="HEAD"):
-        return ["big.py", "small.py"]
-
-    files = {"big.py": "needle\n" * 200_000, "small.py": "needle\n"}  # big.py > 512KB
-
-    async def fake_file(token, repo, path, ref=None):
-        return files.get(path)
-
-    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
-    monkeypatch.setattr(client, "get_repo_file", fake_file)
-    res = await sc.SearchCodeTool().run(_ctx(), sc.SearchCodeTool.input_schema(query="needle"))
-    assert res.ok
-    assert "small.py:1:" in res.content
-    assert "big.py" not in res.content        # oversized file skipped, not scanned
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(aio.CancelledError):
+        await sec.run_semgrep({"a.py": "x"})
+    assert proc.kills == 1  # outer cancellation still reaps the subprocess
 
 
 # ── default model wiring ─────────────────────────────────────────────────────
