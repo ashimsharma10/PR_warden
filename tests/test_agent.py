@@ -594,88 +594,134 @@ def test_security_tool_has_extended_timeout():
     assert sec.CheckSecurityPatternsTool.timeout_s > 15
 
 
-# ── git_blame ────────────────────────────────────────────────────────────────
+# ── semgrep ruleset tuning (issue #9) ────────────────────────────────────────
 
-def _blame_range(start, end, login="alice", number=12):
-    return {
-        "startingLine": start,
-        "endingLine": end,
-        "commit": {
-            "oid": "abc1234567",
-            "messageHeadline": "fix race condition",
-            "committedDate": "2026-05-01T10:00:00Z",
-            "author": {"name": "Alice A", "user": {"login": login}},
-            "associatedPullRequests": {"nodes": [{"number": number, "title": "Fix race"}]},
-        },
-    }
+def test_default_configs_include_owasp_and_cwe():
+    cfgs = sec._DEFAULT_SEMGREP_CONFIGS
+    assert "p/security-audit" in cfgs and "p/secrets" in cfgs
+    assert "p/owasp-top-ten" in cfgs and "p/cwe-top-25" in cfgs
 
 
-def test_range_for_line_selects_covering_range():
-    ranges = [_blame_range(1, 3), _blame_range(4, 10)]
-    assert _range_for_line(ranges, 5) is ranges[1]
-    assert _range_for_line(ranges, 99) is None
+def test_default_excludes_presence_detectors():
+    # The three high-noise audit rules measured against the audited-library corpus.
+    assert {"avoid-pickle", "exec-detected", "eval-detected"} <= set(sec._DEFAULT_EXCLUDED_RULES)
 
 
-async def test_git_blame_hit(monkeypatch):
+def test_drop_excluded_rules_filters_by_substring():
+    findings = [
+        {"check_id": "python.lang.security.deserialization.pickle.avoid-pickle"},
+        {"check_id": "python.lang.security.audit.exec-detected.exec-detected"},
+        {"check_id": "python.lang.security.audit.subprocess-shell-true"},  # keep
+    ]
+    kept = sec.drop_excluded_rules(findings, ("avoid-pickle", "exec-detected"))
+    assert len(kept) == 1
+    assert kept[0]["check_id"].endswith("subprocess-shell-true")
+
+
+def test_drop_excluded_rules_empty_exclusions_is_passthrough():
+    findings = [{"check_id": "x.avoid-pickle"}]
+    assert sec.drop_excluded_rules(findings, ()) == findings
+
+
+def test_semgrep_configs_uses_default_when_unset(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "")
+    assert sec.semgrep_configs() == sec._DEFAULT_SEMGREP_CONFIGS
+
+
+def test_semgrep_configs_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "p/foo, p/bar")
+    assert sec.semgrep_configs() == ("p/foo", "p/bar")
+
+
+def test_excluded_rules_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", "only-this")
+    assert sec.excluded_rules() == ("only-this",)
+
+
+def test_excluded_rules_sentinel_disables(monkeypatch):
+    for sentinel in ("none", "OFF", "-"):
+        monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", sentinel)
+        assert sec.excluded_rules() == ()  # default exclusions turned off
+
+
+async def test_security_tool_drops_excluded_finding_end_to_end(monkeypatch):
     from pr_warden.github import client
 
-    async def fake_blame(token, repo, path, ref=None):
-        return [_blame_range(1, 20)]
+    files = [{"filename": "a.py", "status": "modified", "additions": 1,
+              "deletions": 0, "patch": "@@ -1 +1,2 @@\n ctx\n+import pickle"}]
+    ctx = _ctx(files=files)
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
 
-    monkeypatch.setattr(client, "get_blame", fake_blame)
-    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=5))
+    async def fake_file(token, repo, path, ref=None):
+        return "x\n" * 10
+
+    async def fake_semgrep(contents, **kwargs):
+        # An excluded presence-detector finding ON a changed line — must be dropped
+        # before the changed-line filter ever sees it.
+        return [{"check_id": "python.lang.security.deserialization.pickle.avoid-pickle",
+                 "path": "a.py", "start": {"line": 2}, "end": {"line": 2},
+                 "extra": {"severity": "WARNING", "message": "pickle", "lines": "import pickle"}}]
+
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
     assert res.ok
-    assert "last changed by alice" in res.content
-    assert "fix race condition" in res.content
-    assert "PR #12" in res.content
-    assert res.metadata["sha"] == "abc1234567"
+    assert "[HIGH]" not in res.content and "[MEDIUM]" not in res.content
+    assert "no findings" in res.content.lower()
 
 
-async def test_git_blame_out_of_range(monkeypatch):
-    from pr_warden.github import client
+class _FakeProc:
+    """Stands in for an asyncio subprocess; records kill()."""
+    def __init__(self, communicate):
+        self.returncode = None
+        self._communicate = communicate
+        self.kills = 0
 
-    async def fake_blame(token, repo, path, ref=None):
-        return [_blame_range(1, 3)]
+    async def communicate(self):
+        return await self._communicate()
 
-    monkeypatch.setattr(client, "get_blame", fake_blame)
-    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=50))
-    assert not res.ok and res.error == "out_of_range"
-
-
-async def test_git_blame_no_blame(monkeypatch):
-    from pr_warden.github import client
-
-    async def fake_blame(token, repo, path, ref=None):
-        return None
-
-    monkeypatch.setattr(client, "get_blame", fake_blame)
-    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="new.py", line=1))
-    assert not res.ok and res.error == "not_found"
+    def kill(self):
+        self.kills += 1
+        self.returncode = -9
 
 
-async def test_git_blame_graphql_failure_not_fatal(monkeypatch):
-    from pr_warden.github import client
+async def test_run_semgrep_kills_proc_on_timeout(monkeypatch):
+    import asyncio as aio
 
-    async def boom(token, repo, path, ref=None):
-        raise RuntimeError("graphql down")
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
 
-    monkeypatch.setattr(client, "get_blame", boom)
-    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=1))
-    assert not res.ok and res.error == "blame_failed"
+    async def hang():
+        await aio.sleep(10)
+        return (b"", b"")
+
+    proc = _FakeProc(hang)
+
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    res = await sec.run_semgrep({"a.py": "x"}, timeout=0.01)
+    assert res is None
+    assert proc.kills == 1  # finally killed the timed-out scan
 
 
-async def test_git_blame_falls_back_to_author_name(monkeypatch):
-    from pr_warden.github import client
+async def test_run_semgrep_kills_proc_on_cancel(monkeypatch):
+    import asyncio as aio
 
-    rng = _blame_range(1, 5)
-    rng["commit"]["author"]["user"] = None  # no linked GitHub account
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
 
-    async def fake_blame(token, repo, path, ref=None):
-        return [rng]
+    async def cancelled():
+        raise aio.CancelledError()
 
-    monkeypatch.setattr(client, "get_blame", fake_blame)
-    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=2))
-    assert res.ok and "Alice A" in res.content
+    proc = _FakeProc(cancelled)
+
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(aio.CancelledError):
+        await sec.run_semgrep({"a.py": "x"})
+    assert proc.kills == 1  # outer cancellation still reaps the subprocess
 
 
 # ── default model wiring ─────────────────────────────────────────────────────

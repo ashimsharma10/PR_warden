@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     summarizer_max_cost_usd: float = 0.10
     daily_cost_limit_usd: float = 5.00
 
+    # ── Semgrep ruleset (check_security_patterns) ───────────────────────────
+    # Comma-separated overrides; empty → the tool's curated defaults. Lets
+    # operators retune packs/exclusions without a code change.
+    semgrep_configs: str = ""
+    semgrep_exclude_rules: str = ""
     # ── Tool-using review agent (off by default) ────────────────────────────
     # Comma-separated "owner/name" allowlist. Empty → the agent never runs, so
     # deploying this code changes nothing in prod until a repo is flipped on.
