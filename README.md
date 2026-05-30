@@ -3,19 +3,61 @@
 A GitHub App that reviews pull requests automatically — cuts the noise so
 maintainers only look at PRs worth looking at.
 
-On every PR open / push / reopen, it runs 13 deterministic checks, posts a
-single Markdown comment with a pass/fail table (edited in place on later
-events, not spammed), and labels the PR `prwarden:clean` or
-`prwarden:needs-attention`.
+On every PR open / push / reopen (drafts skipped), it runs **18 deterministic
+checks**, optionally runs a **tool-using LLM review agent**, posts a single
+Markdown comment (edited in place on later events, never spammed), and labels
+the PR `prwarden:clean` or `prwarden:needs-attention`.
 
-The checks cover:
+## How it works
 
-- **PR hygiene** — title quality, description length, PR size, branch naming, reviewer assignment
-- **Anti-slop signals** — AI-named branches (`claude-/codex-/cursor-/copilot-`), `Co-Authored-By: Claude` footers, boilerplate template descriptions, description-too-thin-for-diff
-- **Diff smell** — no test files for source changes, weakened test assertions, empty function bodies (`pass`, `return None`, `// TODO`), trivial doc-only diffs, lock-file-only churn
+A `pull_request` webhook (`opened` / `synchronize` / `reopened`, non-draft)
+kicks off a background task that:
 
-Each repo can drop a `.github/prwarden.yml` to tune thresholds or disable
-individual checks. No config file = sensible defaults.
+1. Loads the repo's `.github/prwarden.yml` config (falls back to defaults).
+2. Fetches the PR's files, commits, repo tree, and CODEOWNERS, then runs
+   `gitleaks` over the diff additions.
+3. Runs the deterministic checks.
+4. Optionally runs the LLM agent (allowlisted repos only, under a daily cost
+   ceiling).
+5. Creates or edits one PR comment, swaps the label, and records the run in the
+   database for `/stats` and cost accounting.
+
+The label is `prwarden:clean` only if **every** check passes. The agent is
+purely additive — if it's disabled, over budget, times out, or crashes, the
+deterministic checks still post.
+
+## The deterministic checks
+
+**PR metadata** (`checks/no_diff.py`)
+- `title_quality` — title is descriptive, not a placeholder
+- `description` — description meets a minimum length (`min_chars`, default 20)
+- `pr_size` — under file/line limits (`file_limit` 25, `line_limit` 500)
+- `branch_naming` — branch uses an allowed prefix (`feat/`, `fix/`, …)
+- `self_merge` — author isn't the sole reviewer/approver
+- `ai_branch` — flags AI-tool-named branches (`claude-`, `codex-`, `cursor-`,
+  `copilot-`, `devin-`)
+- `ai_commit_footer` — flags `Co-Authored-By: Claude` (and similar) footers
+- `boilerplate_description` — flags untouched PR-template boilerplate
+- `description_vs_diff` — flags a thin description on a large diff
+
+**Diff smell** (`checks/diff_aware.py`)
+- `trivial_metadata_diff` — flags trivial metadata-only churn
+- `no_tests` — source changed without any test file (supports `exempt_paths`)
+- `test_assertions_weakened` — flags weakened/removed test assertions
+- `empty_function_bodies` — flags `pass` / `return None` / `// TODO` stubs
+- `dependency_only_churn` — flags lock-file-only diffs
+
+**Impact & security** (`checks/impact.py`)
+- `shared_code` — touches conventionally-shared dirs (`utils`, `lib`, `core`, …)
+- `critical_path` — touches repo-declared high-risk globs (`auth/**`,
+  `payments/**`, `migrations/**`, …); off until globs are configured
+- `codeowners` — changed files have a required CODEOWNERS reviewer
+- `secret_leak` — `gitleaks` scan of the diff additions surfaced a secret
+
+### Per-repo config
+
+Drop a `.github/prwarden.yml` to tune thresholds or disable individual checks.
+No config file (or invalid YAML) = sensible defaults; unknown keys are ignored.
 
 ```yaml
 # Example .github/prwarden.yml
@@ -26,68 +68,78 @@ checks:
     enabled: false
   no_tests:
     exempt_paths: ["docs/**", "scripts/one_off/**"]
+  critical_path:
+    globs: ["auth/**", "payments/**", "migrations/**", ".github/workflows/**"]
 ```
+
+## The review agent
+
+A tool-using agent (Claude Sonnet by default) that produces a structured
+assessment of the PR. It is **off by default** and gated three ways: the repo
+must be in the `AGENT_REVIEW_REPOS` allowlist, an Anthropic API key must be set,
+and the day's recorded spend must be under `DAILY_COST_LIMIT_USD`. A wall-clock
+timeout (default 90s) guards the webhook handler.
+
+The loop (`agent/loop.py`) owns iteration and budget — the model only decides
+"what next." It bounds runs to 12 tool calls / 15 iterations / 80k tokens, runs
+the model's tool calls in parallel, terminates via an explicit structured `done`
+tool, and force-finalizes on budget exhaustion so a run always returns something.
+Tool errors come back as `tool_result`s rather than crashing the loop.
+
+Tools available to the agent: `get_pr_diff`, `get_file`, `get_issue`,
+`find_references`, `search_code`, `git_blame`, `get_repo_conventions`,
+`get_author_history`, `check_security_patterns` (Semgrep), and `done`.
+
+The `done` assessment (rendered as an "Agent Review" section in the PR comment)
+carries: a summary, files touched, whether the diff matches the stated intent
+(with a mismatch reason), notable findings, open questions, and a confidence
+score.
+
+## Endpoints
+
+- `POST /webhook` — GitHub webhook receiver (HMAC signature verified)
+- `GET /stats` — totals, failures-by-check, and recent runs (optionally
+  bearer-token protected via `STATS_BEARER_TOKEN`)
 
 ## Run it
 
-Requires Python 3.12+.
+Requires Python 3.12+ and a Postgres database. `gitleaks` and `semgrep` should
+be on `PATH` for the secret-leak check and the agent's security tool; both
+degrade gracefully if missing.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env       # fill in GitHub App creds
+cp .env.example .env       # fill in GitHub App creds (and optional agent creds)
 alembic upgrade head
 uvicorn pr_warden.main:app --reload
 ```
 
-Tests: `pytest -q` (95 passing).
+Or via Docker: `docker compose up`.
 
-## Roadmap
+Tests: `pytest -q`.
 
-The deterministic checks are the cheap, fast pre-filter. The bigger
-goal is an *agentic* reviewer that helps maintainers move faster on the PRs
-that pass the filter.
+## Configuration (env)
 
-**Phase 1 — CI integration.** Listen for `check_run` / `check_suite` webhook
-events. When CI completes, fetch the conclusion via the Checks API and add a
-`ci_passing` check. Surface failing test names in the PR comment so the
-maintainer doesn't have to click into the CI tab.
-
-**Phase 2 — LLM-based scope-creep detection.** A new `scope_match` check uses
-Claude to parse the PR title + description into a structured intent, parse
-the file list into structured actual changes, and flag files that don't match
-the stated scope. ("Fix typo in README" + touches `src/auth.py` → flagged.)
-The summarizer scaffolding in `src/pr_warden/summarizer/` exists for this.
-
-**Phase 3 — LLM-based test coverage analysis.** Replace the current
-heuristic (`no_tests` flags any source-without-test diff) with a smarter one:
-identify which functions changed in each source file, then check whether any
-test file in the diff actually exercises those functions.
-
-**Phase 4 — Focused review summary.** Instead of a longer review, produce a
-*shorter* one that points the maintainer at the 5% of the diff that matters:
-risk level, the 3 files to read first, specific concerns with `file:line`
-citations. Every claim must cite evidence.
-
-**Phase 5 — Slash commands.** Maintainer overrides via PR comments:
-`/prwarden recheck`, `/prwarden explain <check>`, `/prwarden ignore <check>`.
-Lets a human dismiss a false positive in one comment instead of arguing with
-the bot.
-
-**Phase 6 — Decision output + auto-close policy.** For PRs that fail many
-anti-slop checks at once (AI branch + boilerplate description + lock-file
-churn + no tests = clear slop), auto-close with an explanatory comment.
-Default for everything else stays `comment_only`; the bot never blocks merges
-on its own.
-
-**Phase 7 — Suppression learning.** Track when maintainers use
-`/prwarden ignore` and which checks correlate with PR closures vs merges.
-Use the data to tune thresholds per-repo over time.
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` / `GITHUB_WEBHOOK_SECRET` | GitHub App auth | — |
+| `DATABASE_URL` | Postgres (async) DSN | local dev DSN |
+| `ANTHROPIC_API_KEY` | Enables the agent / summarizer | unset |
+| `AGENT_REVIEW_REPOS` | Comma-separated `owner/name` allowlist for the agent | empty (agent off) |
+| `AGENT_MODEL` / `AGENT_TIMEOUT_S` | Agent model and wall-clock cap | `claude-sonnet-4-6` / 90s |
+| `DAILY_COST_LIMIT_USD` | Daily agent spend ceiling | 5.00 |
+| `SEMGREP_CONFIGS` / `SEMGREP_EXCLUDE_RULES` | Override the security ruleset | curated defaults |
+| `STATS_BEARER_TOKEN` | Protect `/stats` | unset (open) |
 
 ## Design principles
 
-- **High signal, low noise.** A reviewer that posts noise is worse than no reviewer. Default to `comment_only`, never `request_changes`.
-- **Cite evidence.** Every claim links to `file:line`. No vague opinions.
-- **One comment, edited.** Never thread, never reply, never react.
+- **High signal, low noise.** A reviewer that posts noise is worse than no
+  reviewer. Default to comment-only; never `request_changes`, never block a merge.
+- **One comment, edited.** Never thread, never reply, never react. A per-PR lock
+  serializes create-or-update so concurrent events don't double-post.
+- **Cheap by default.** Deterministic checks run first and always. The LLM runs
+  only for allowlisted repos, gated by a daily cost ceiling.
+- **Additive, never fatal.** The agent layer can fail in any way and the base
+  pipeline still posts.
 - **Maintainer always owns the decision.** The bot suggests; humans decide.
-- **Cheap by default.** Deterministic checks run first. LLM only when it adds value, gated by a daily cost ceiling.
