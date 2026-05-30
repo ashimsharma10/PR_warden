@@ -28,6 +28,7 @@ import structlog
 
 from pr_warden.agent.context import PRContext
 from pr_warden.agent.schemas import ToolInput, ToolResult
+from pr_warden.config import settings
 from pr_warden.github import client
 
 log = structlog.get_logger()
@@ -40,8 +41,63 @@ _MAX_FILES = 50
 _MAX_FINDINGS_SHOWN = 12
 _SNIPPET_CAP = 160
 
-_SEMGREP_CONFIGS = ("p/security-audit", "p/secrets")
+# Curated ruleset (issue #9), tuned against this repo + 7 well-audited libraries
+# (fastapi, starlette, sqlalchemy, httpx, pydantic, anthropic, uvicorn):
+#   - p/security-audit is the leanest broad pack here; p/default was ~4x noisier
+#     (framework rules like raw-SQL/formatted-SQL), so it was rejected.
+#   - p/secrets adds credential detection at near-zero false-positive cost.
+#   - p/owasp-top-ten + p/cwe-top-25 close real coverage gaps (e.g. weak-hash
+#     md5, which the base packs missed on a deliberately-vulnerable corpus).
+# Registry packs (not vendored): the false-positive set is small and well
+# characterised, and the tool already degrades gracefully when offline, so
+# vendoring would cost rule freshness for little gain. Revisit if fully-offline
+# operation becomes a hard requirement.
+_DEFAULT_SEMGREP_CONFIGS = (
+    "p/security-audit",
+    "p/secrets",
+    "p/owasp-top-ten",
+    "p/cwe-top-25",
+)
+
+# "Presence detector" audit rules: they flag the mere use of a construct with no
+# taint/dataflow analysis, so they fire constantly on legitimate code (19 of 20
+# findings across the audited-library corpus were these three). A maintainer who
+# uses pickle/exec/eval deliberately does not need a bot flagging it on every PR.
+# Matched as substrings of the Semgrep check_id.
+_DEFAULT_EXCLUDED_RULES = (
+    "avoid-pickle",
+    "exec-detected",
+    "eval-detected",
+)
+
 _SEVERITY = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW"}
+
+
+def _split_csv(raw: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def semgrep_configs() -> tuple[str, ...]:
+    """Active rule packs: SEMGREP_CONFIGS override, else the curated defaults."""
+    return _split_csv(settings.semgrep_configs) or _DEFAULT_SEMGREP_CONFIGS
+
+
+def excluded_rules() -> tuple[str, ...]:
+    """Rule-id substrings to drop: SEMGREP_EXCLUDE_RULES override, else defaults."""
+    override = settings.semgrep_exclude_rules.strip()
+    if override:
+        return _split_csv(settings.semgrep_exclude_rules)
+    return _DEFAULT_EXCLUDED_RULES
+
+
+def drop_excluded_rules(findings: list[dict], excluded: tuple[str, ...]) -> list[dict]:
+    """Remove findings whose check_id contains any excluded substring."""
+    if not excluded:
+        return findings
+    return [
+        f for f in findings
+        if not any(x in (f.get("check_id") or "") for x in excluded)
+    ]
 
 _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
 
@@ -108,7 +164,7 @@ async def run_semgrep(
             dest.write_text(content, encoding="utf-8", errors="replace")
 
         config_args: list[str] = []
-        for cfg in _SEMGREP_CONFIGS:
+        for cfg in semgrep_configs():
             config_args += ["--config", cfg]
 
         proc = await asyncio.create_subprocess_exec(
@@ -237,6 +293,7 @@ Skip for docs, non-auth configuration, or test-only changes."""
                 metadata={"skipped": "semgrep_error"},
             )
 
+        findings = drop_excluded_rules(findings, excluded_rules())
         in_diff = filter_to_changed_lines(findings, changed_by_path)
         if not in_diff:
             note = (

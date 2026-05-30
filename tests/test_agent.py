@@ -592,6 +592,76 @@ def test_security_tool_has_extended_timeout():
     assert sec.CheckSecurityPatternsTool.timeout_s > 15
 
 
+# ── semgrep ruleset tuning (issue #9) ────────────────────────────────────────
+
+def test_default_configs_include_owasp_and_cwe():
+    cfgs = sec._DEFAULT_SEMGREP_CONFIGS
+    assert "p/security-audit" in cfgs and "p/secrets" in cfgs
+    assert "p/owasp-top-ten" in cfgs and "p/cwe-top-25" in cfgs
+
+
+def test_default_excludes_presence_detectors():
+    # The three high-noise audit rules measured against the audited-library corpus.
+    assert {"avoid-pickle", "exec-detected", "eval-detected"} <= set(sec._DEFAULT_EXCLUDED_RULES)
+
+
+def test_drop_excluded_rules_filters_by_substring():
+    findings = [
+        {"check_id": "python.lang.security.deserialization.pickle.avoid-pickle"},
+        {"check_id": "python.lang.security.audit.exec-detected.exec-detected"},
+        {"check_id": "python.lang.security.audit.subprocess-shell-true"},  # keep
+    ]
+    kept = sec.drop_excluded_rules(findings, ("avoid-pickle", "exec-detected"))
+    assert len(kept) == 1
+    assert kept[0]["check_id"].endswith("subprocess-shell-true")
+
+
+def test_drop_excluded_rules_empty_exclusions_is_passthrough():
+    findings = [{"check_id": "x.avoid-pickle"}]
+    assert sec.drop_excluded_rules(findings, ()) == findings
+
+
+def test_semgrep_configs_uses_default_when_unset(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "")
+    assert sec.semgrep_configs() == sec._DEFAULT_SEMGREP_CONFIGS
+
+
+def test_semgrep_configs_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_configs", "p/foo, p/bar")
+    assert sec.semgrep_configs() == ("p/foo", "p/bar")
+
+
+def test_excluded_rules_override(monkeypatch):
+    monkeypatch.setattr(sec.settings, "semgrep_exclude_rules", "only-this")
+    assert sec.excluded_rules() == ("only-this",)
+
+
+async def test_security_tool_drops_excluded_finding_end_to_end(monkeypatch):
+    from pr_warden.github import client
+
+    files = [{"filename": "a.py", "status": "modified", "additions": 1,
+              "deletions": 0, "patch": "@@ -1 +1,2 @@\n ctx\n+import pickle"}]
+    ctx = _ctx(files=files)
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def fake_file(token, repo, path, ref=None):
+        return "x\n" * 10
+
+    async def fake_semgrep(contents, **kwargs):
+        # An excluded presence-detector finding ON a changed line — must be dropped
+        # before the changed-line filter ever sees it.
+        return [{"check_id": "python.lang.security.deserialization.pickle.avoid-pickle",
+                 "path": "a.py", "start": {"line": 2}, "end": {"line": 2},
+                 "extra": {"severity": "WARNING", "message": "pickle", "lines": "import pickle"}}]
+
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
+    assert res.ok
+    assert "[HIGH]" not in res.content and "[MEDIUM]" not in res.content
+    assert "no findings" in res.content.lower()
+
+
 # ── default model wiring ─────────────────────────────────────────────────────
 
 def test_default_model_is_sonnet():
