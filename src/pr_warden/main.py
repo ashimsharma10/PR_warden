@@ -1,6 +1,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, time, timezone
 
 import structlog
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
@@ -8,6 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import pr_warden.log as pr_warden_log
+from pr_warden.agent.context import PRContext
+from pr_warden.agent.loop import run_agent
+from pr_warden.agent.schemas import AgentResult
 from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
 from pr_warden.composer import LABEL_CLEAN, LABEL_NEEDS_ATTENTION, build_comment, pick_label
@@ -22,6 +26,23 @@ from pr_warden.repo_config import CONFIG_PATH, DEFAULT_CONFIG, RepoConfig, parse
 log = structlog.get_logger()
 
 _REVIEWABLE_ACTIONS = {"opened", "synchronize", "reopened"}
+
+# Serialize the "find existing comment → create-or-update" step per PR.
+# _handle_pr_event runs as a fire-and-forget background task, so two near-
+# simultaneous events for the same PR (e.g. rapid pushes, now widened by the
+# agent's multi-second runtime) could both find no existing comment and each
+# create one. A per-PR asyncio.Lock makes that step atomic. Single-instance bot,
+# so an in-process lock suffices; the dict grows by one entry per PR seen.
+_pr_comment_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+
+def _pr_comment_lock(repo: str, pr_number: int) -> asyncio.Lock:
+    key = (repo, pr_number)
+    lock = _pr_comment_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pr_comment_locks[key] = lock
+    return lock
 
 
 @asynccontextmanager
@@ -97,6 +118,67 @@ async def _build_check_context(
     )
 
 
+async def _today_agent_cost() -> float:
+    """Sum of agent cost recorded so far today (UTC) — the daily-budget gate."""
+    start = datetime.combine(
+        datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
+    )
+    async with async_session_factory() as session:
+        total = await session.scalar(
+            select(func.coalesce(func.sum(PRCheck.cost_usd), 0.0)).where(
+                PRCheck.created_at >= start
+            )
+        )
+    return float(total or 0.0)
+
+
+async def _maybe_run_agent(
+    token: str, repo: str, event: PullRequestEvent, files: list[dict]
+) -> AgentResult | None:
+    """Run the review agent if it's allowlisted, configured, and under budget.
+
+    Every failure mode — disabled, no key, over budget, timeout, or a crash in
+    the run — returns None so the deterministic checks still post. The agent is
+    additive; it must never break the base pipeline.
+    """
+    if not settings.agent_enabled_for(repo):
+        return None
+    if not settings.anthropic_api_key:
+        log.info("agent.skipped", reason="no_api_key")
+        return None
+
+    spent = await _today_agent_cost()
+    if spent >= settings.daily_cost_limit_usd:
+        log.warning("agent.skipped", reason="daily_budget", spent_usd=round(spent, 4))
+        return None
+
+    pr_ctx = PRContext(token=token, repo=repo, pr=event.pull_request, files=files)
+    try:
+        result = await asyncio.wait_for(
+            run_agent(
+                pr_ctx,
+                api_key=settings.anthropic_api_key,
+                model=settings.agent_model,
+            ),
+            timeout=settings.agent_timeout_s,
+        )
+    except asyncio.TimeoutError:
+        log.warning("agent.timeout", timeout_s=settings.agent_timeout_s)
+        return None
+    except Exception:
+        log.exception("agent.run_failed")
+        return None
+
+    log.info(
+        "agent.completed",
+        stopped_for=result.stopped_for,
+        cost_usd=round(result.cost_usd, 4),
+        tool_calls=result.tool_call_count,
+        duration_ms=result.duration_ms,
+    )
+    return result
+
+
 async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
     structlog.contextvars.bind_contextvars(
         trace_id=trace_id,
@@ -112,10 +194,13 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         config = await _load_repo_config(token, repo)
         ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
-        comment_body = build_comment(results)
         label = pick_label(results)
 
-        async with async_session_factory() as session:
+        agent_result = await _maybe_run_agent(token, repo, event, ctx.files)
+        agent_assessment = agent_result.assessment if agent_result else None
+        comment_body = build_comment(results, agent=agent_assessment)
+
+        async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
             repo_row.cached_config = config.model_dump()
 
@@ -145,6 +230,11 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                     check_results={
                         r.name: {"passed": r.passed, "reason": r.reason} for r in results
                     },
+                    summary=agent_result.assessment.summary if agent_result else None,
+                    cost_usd=agent_result.cost_usd if agent_result else None,
+                    agent_result=(
+                        agent_result.model_dump(mode="json") if agent_result else None
+                    ),
                     action_taken=label,
                     comment_id=comment_id,
                 )

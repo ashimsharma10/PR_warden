@@ -20,6 +20,72 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
+async def graphql(token: str, query: str, variables: dict) -> dict:
+    """POST a GraphQL query to GitHub's v4 API and return the `data` payload.
+
+    Raises on transport errors or any GraphQL `errors` in the response — the
+    REST helpers raise on failure too, so callers handle both the same way.
+    """
+    r = await _client.post(
+        f"{GH_API}/graphql",
+        headers=_headers(token),
+        json={"query": query, "variables": variables},
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("errors"):
+        raise RuntimeError(f"GraphQL error: {payload['errors']}")
+    data: dict = payload.get("data") or {}
+    return data
+
+
+_BLAME_QUERY = """
+query($owner: String!, $name: String!, $ref: String!, $path: String!) {
+  repository(owner: $owner, name: $name) {
+    object(expression: $ref) {
+      ... on Commit {
+        blame(path: $path) {
+          ranges {
+            startingLine
+            endingLine
+            commit {
+              oid
+              messageHeadline
+              committedDate
+              author { name user { login } }
+              associatedPullRequests(first: 1) { nodes { number title } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+async def get_blame(
+    token: str, repo: str, path: str, ref: str
+) -> list[dict] | None:
+    """Return blame ranges for `path` at `ref` (blame is GraphQL-only).
+
+    Each range is ``{startingLine, endingLine, commit: {...}}``. Returns None if
+    the path or commit can't be resolved (object/blame is null).
+    """
+    owner, name = repo.split("/", 1)
+    data = await graphql(
+        token,
+        _BLAME_QUERY,
+        {"owner": owner, "name": name, "ref": ref, "path": path},
+    )
+    obj = ((data.get("repository") or {}).get("object")) or {}
+    blame = obj.get("blame")
+    if not blame:
+        return None
+    ranges: list[dict] = blame.get("ranges", [])
+    return ranges
+
+
 async def get_repo_file(
     token: str, repo: str, path: str, ref: str | None = None
 ) -> str | None:
