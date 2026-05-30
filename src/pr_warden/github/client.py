@@ -55,6 +55,29 @@ async def get_issue(token: str, repo: str, number: int) -> dict | None:
     return r.json()
 
 
+async def search_author_prs(
+    token: str, repo: str, author: str, limit: int = 10
+) -> list[dict]:
+    """Return the author's most recent PRs on this repo (newest first).
+
+    Uses the search API; each item carries `state` and, for merged PRs, a
+    `pull_request.merged_at` timestamp that distinguishes merged from closed.
+    """
+    r = await _client.get(
+        f"{GH_API}/search/issues",
+        headers=_headers(token),
+        params={
+            "q": f"repo:{repo} type:pr author:{author}",
+            "sort": "created",
+            "order": "desc",
+            "per_page": limit,
+        },
+    )
+    r.raise_for_status()
+    items: list[dict] = r.json().get("items", [])
+    return items
+
+
 async def list_issue_comments(
     token: str, repo: str, number: int, limit: int = 10
 ) -> list[dict]:

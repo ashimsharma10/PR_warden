@@ -7,9 +7,11 @@ from pr_warden.agent.loop import MODEL, run_agent
 from pr_warden.agent.schemas import DoneInput, ToolResult
 from pr_warden.agent.tools import build_tools, tool_to_anthropic_schema
 from pr_warden.agent.tools.find_references import FindReferencesTool, find_symbol_refs
+from pr_warden.agent.tools.get_author_history import GetAuthorHistoryTool
 from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
+from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 
 
@@ -96,7 +98,10 @@ def test_tool_to_anthropic_schema_shape():
 def test_build_tools_includes_done():
     names = {t.name for t in build_tools()}
     assert "done" in names
-    assert {"get_file", "get_pr_diff", "get_issue", "find_references"} <= names
+    assert {
+        "get_file", "get_pr_diff", "get_issue", "find_references",
+        "get_repo_conventions", "get_author_history",
+    } <= names
 
 
 # ── loop ────────────────────────────────────────────────────────────────────
@@ -298,6 +303,94 @@ async def test_find_references_none_found(monkeypatch):
         _ctx(), FindReferencesTool.input_schema(symbol="login", file_path="a.py")
     )
     assert res.ok and "No references" in res.content
+
+
+# ── get_repo_conventions ─────────────────────────────────────────────────────
+
+async def test_get_repo_conventions(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["docs/architecture/overview.md", "src/x.py", "README.md"]
+
+    docs = {
+        "CONTRIBUTING.md": "Run black before committing.",
+        "docs/architecture/overview.md": "Hexagonal architecture.",
+    }
+
+    async def fake_file(token, repo, path, ref=None):
+        return docs.get(path)
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await GetRepoConventionsTool().run(_ctx(), GetRepoConventionsTool.input_schema())
+    assert res.ok
+    assert "Run black" in res.content
+    assert "Hexagonal architecture" in res.content
+
+
+async def test_get_repo_conventions_none_found(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return []
+
+    async def fake_file(token, repo, path, ref=None):
+        return None
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await GetRepoConventionsTool().run(_ctx(), GetRepoConventionsTool.input_schema())
+    assert res.ok and "No convention" in res.content
+
+
+async def test_get_repo_conventions_survives_tree_error(monkeypatch):
+    from pr_warden.github import client
+
+    async def boom_tree(token, repo, branch="HEAD"):
+        raise RuntimeError("tree api down")
+
+    async def fake_file(token, repo, path, ref=None):
+        return "Be nice." if path == "CODE_OF_CONDUCT.md" else None
+
+    monkeypatch.setattr(client, "list_repo_tree", boom_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await GetRepoConventionsTool().run(_ctx(), GetRepoConventionsTool.input_schema())
+    assert res.ok and "Be nice." in res.content
+
+
+# ── get_author_history ───────────────────────────────────────────────────────
+
+async def test_get_author_history(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_search(token, repo, author, limit=10):
+        return [
+            {"number": 7, "title": "this PR", "state": "open", "created_at": "2026-05-29T00:00:00Z"},
+            {"number": 5, "title": "earlier feature", "state": "closed",
+             "pull_request": {"merged_at": "2026-05-01T00:00:00Z"}, "created_at": "2026-04-28T00:00:00Z"},
+            {"number": 4, "title": "abandoned", "state": "closed",
+             "pull_request": {"merged_at": None}, "created_at": "2026-04-20T00:00:00Z"},
+        ]
+
+    monkeypatch.setattr(client, "search_author_prs", fake_search)
+    res = await GetAuthorHistoryTool().run(_ctx(), GetAuthorHistoryTool.input_schema())
+    assert res.ok
+    assert "#7" not in res.content          # current PR excluded
+    assert "#5 earlier feature — merged" in res.content
+    assert "#4 abandoned — closed" in res.content
+    assert "1 merged" in res.content
+
+
+async def test_get_author_history_no_prior(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_search(token, repo, author, limit=10):
+        return [{"number": 7, "title": "this PR", "state": "open", "created_at": "2026-05-29T00:00:00Z"}]
+
+    monkeypatch.setattr(client, "search_author_prs", fake_search)
+    res = await GetAuthorHistoryTool().run(_ctx(), GetAuthorHistoryTool.input_schema())
+    assert res.ok and "no prior PRs" in res.content
 
 
 # ── diff section (prioritized inclusion) ─────────────────────────────────────
