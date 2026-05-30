@@ -27,6 +27,23 @@ log = structlog.get_logger()
 
 _REVIEWABLE_ACTIONS = {"opened", "synchronize", "reopened"}
 
+# Serialize the "find existing comment → create-or-update" step per PR.
+# _handle_pr_event runs as a fire-and-forget background task, so two near-
+# simultaneous events for the same PR (e.g. rapid pushes, now widened by the
+# agent's multi-second runtime) could both find no existing comment and each
+# create one. A per-PR asyncio.Lock makes that step atomic. Single-instance bot,
+# so an in-process lock suffices; the dict grows by one entry per PR seen.
+_pr_comment_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+
+def _pr_comment_lock(repo: str, pr_number: int) -> asyncio.Lock:
+    key = (repo, pr_number)
+    lock = _pr_comment_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pr_comment_locks[key] = lock
+    return lock
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -183,7 +200,7 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         agent_assessment = agent_result.assessment if agent_result else None
         comment_body = build_comment(results, agent=agent_assessment)
 
-        async with async_session_factory() as session:
+        async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
             repo_row.cached_config = config.model_dump()
 
