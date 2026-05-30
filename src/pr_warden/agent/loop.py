@@ -81,8 +81,9 @@ async def _execute_tool(tool_map: dict, ctx: PRContext, block: Any) -> ToolResul
         validated = tool.input_schema.model_validate(block.input)
     except ValidationError as e:
         return ToolResult(ok=False, content=f"Input validation failed: {e}", error="validation_error")
+    timeout = getattr(tool, "timeout_s", TOOL_TIMEOUT_S)
     try:
-        return await asyncio.wait_for(tool.run(ctx, validated), timeout=TOOL_TIMEOUT_S)
+        return await asyncio.wait_for(tool.run(ctx, validated), timeout=timeout)
     except asyncio.TimeoutError:
         return ToolResult(ok=False, content=f"Tool '{tool.name}' timed out.", error="timeout")
     except Exception as e:  # noqa: BLE001 — a tool must never crash the loop

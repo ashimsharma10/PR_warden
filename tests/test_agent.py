@@ -100,7 +100,7 @@ def test_build_tools_includes_done():
     assert "done" in names
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
-        "get_repo_conventions", "get_author_history",
+        "get_repo_conventions", "get_author_history", "check_security_patterns",
     } <= names
 
 
@@ -452,6 +452,144 @@ async def test_withheld_file_still_readable_via_get_pr_diff():
     ctx = _ctx(files=files)
     res = await GetPRDiffTool().run(ctx, GetPRDiffTool.input_schema(file_path="huge.py"))
     assert res.ok and "secret_logic" in res.content
+
+
+# ── check_security_patterns ──────────────────────────────────────────────────
+
+from pr_warden.agent.tools import check_security_patterns as sec  # noqa: E402
+
+
+def test_added_line_numbers():
+    patch = (
+        "@@ -1,3 +1,4 @@\n"
+        " context\n"
+        "+added_one\n"
+        "-removed\n"
+        " context2\n"
+        "+added_two\n"
+    )
+    # new file: line1 context, line2 added_one, (removed skipped), line3 context2, line4 added_two
+    assert sec.added_line_numbers(patch) == {2, 4}
+
+
+def test_added_line_numbers_multiple_hunks():
+    patch = "@@ -1 +1 @@\n+a\n@@ -10,2 +10,3 @@\n ctx\n+b\n+c\n"
+    assert sec.added_line_numbers(patch) == {1, 11, 12}
+
+
+def test_is_scannable():
+    assert sec.is_scannable("src/api/admin.py")
+    assert not sec.is_scannable("package-lock.json")
+    assert not sec.is_scannable("frontend/yarn.lock")
+    assert not sec.is_scannable("vendor/lib/x.go")
+    assert not sec.is_scannable("static/app.min.js")
+
+
+def test_filter_to_changed_lines():
+    findings = [
+        {"path": "a.py", "start": {"line": 5}, "end": {"line": 5}},   # changed
+        {"path": "a.py", "start": {"line": 99}, "end": {"line": 99}}, # untouched
+        {"path": "b.py", "start": {"line": 1}, "end": {"line": 1}},   # file not in map
+    ]
+    kept = sec.filter_to_changed_lines(findings, {"a.py": {5, 6}})
+    assert len(kept) == 1 and kept[0]["start"]["line"] == 5
+
+
+def test_format_findings_shape():
+    findings = [{
+        "check_id": "python.lang.security.audit.dangerous-subprocess-use",
+        "path": "src/api/admin.py",
+        "start": {"line": 47}, "end": {"line": 47},
+        "extra": {"severity": "ERROR", "message": "Potential command injection.",
+                  "lines": "subprocess.run(cmd, shell=True)"},
+    }]
+    out = sec._format_findings(findings)
+    assert "[HIGH]" in out
+    assert "src/api/admin.py:47" in out
+    assert "command injection" in out
+
+
+async def test_security_tool_skips_without_semgrep(monkeypatch):
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: False)
+    res = await sec.CheckSecurityPatternsTool().run(
+        _ctx(), sec.CheckSecurityPatternsInput()
+    )
+    assert res.ok and "skipped" in res.content.lower()
+
+
+async def test_security_tool_end_to_end(monkeypatch):
+    from pr_warden.github import client
+
+    files = [{"filename": "admin.py", "status": "modified", "additions": 1,
+              "deletions": 0, "patch": "@@ -46,2 +46,3 @@\n ctx\n+subprocess.run(cmd, shell=True)\n ctx2"}]
+    ctx = _ctx(files=files)
+
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def fake_file(token, repo, path, ref=None):
+        return "line\n" * 50
+
+    async def fake_semgrep(contents, **kwargs):
+        return [{
+            "check_id": "dangerous-subprocess-use",
+            "path": "admin.py",
+            "start": {"line": 47}, "end": {"line": 47},
+            "extra": {"severity": "ERROR", "message": "command injection",
+                      "lines": "subprocess.run(cmd, shell=True)"},
+        }]
+
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
+    assert res.ok
+    assert "[HIGH]" in res.content
+    assert res.metadata["findings_in_diff"] == 1
+
+
+async def test_security_tool_finding_outside_diff_is_dropped(monkeypatch):
+    from pr_warden.github import client
+
+    files = [{"filename": "admin.py", "status": "modified", "additions": 1,
+              "deletions": 0, "patch": "@@ -1,1 +1,2 @@\n ctx\n+safe_line"}]
+    ctx = _ctx(files=files)
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def fake_file(token, repo, path, ref=None):
+        return "x\n" * 100
+
+    async def fake_semgrep(contents, **kwargs):
+        return [{"check_id": "r", "path": "admin.py",
+                 "start": {"line": 80}, "end": {"line": 80},
+                 "extra": {"severity": "WARNING", "message": "m", "lines": "z"}}]
+
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
+    assert res.ok and "none on lines this PR changed" in res.content
+
+
+async def test_security_tool_scanner_error(monkeypatch):
+    from pr_warden.github import client
+
+    ctx = _ctx(files=[{"filename": "a.py", "status": "modified", "additions": 1,
+                       "deletions": 0, "patch": "@@ -1 +1,2 @@\n ctx\n+x"}])
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def fake_file(token, repo, path, ref=None):
+        return "x\n"
+
+    async def fake_semgrep(contents, **kwargs):
+        return None  # scanner unavailable / errored
+
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    monkeypatch.setattr(sec, "run_semgrep", fake_semgrep)
+    res = await sec.CheckSecurityPatternsTool().run(ctx, sec.CheckSecurityPatternsInput())
+    assert res.ok and "unavailable" in res.content
+
+
+def test_security_tool_has_extended_timeout():
+    assert sec.CheckSecurityPatternsTool.timeout_s > 15
 
 
 # ── default model wiring ─────────────────────────────────────────────────────
