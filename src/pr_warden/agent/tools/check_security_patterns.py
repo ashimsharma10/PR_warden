@@ -177,9 +177,15 @@ async def run_semgrep(
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
             log.error("semgrep.timeout")
             return None
+        finally:
+            # Kill if still running: covers the timeout above *and* outer
+            # cancellation (e.g. the agent's wall-clock cap), which raises
+            # CancelledError here — without this, the scan is orphaned and keeps
+            # burning CPU after we've stopped waiting for it.
+            if proc.returncode is None:
+                proc.kill()
 
         raw = stdout.decode().strip()
         if not raw:

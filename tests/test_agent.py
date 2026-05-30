@@ -662,6 +662,60 @@ async def test_security_tool_drops_excluded_finding_end_to_end(monkeypatch):
     assert "no findings" in res.content.lower()
 
 
+class _FakeProc:
+    """Stands in for an asyncio subprocess; records kill()."""
+    def __init__(self, communicate):
+        self.returncode = None
+        self._communicate = communicate
+        self.kills = 0
+
+    async def communicate(self):
+        return await self._communicate()
+
+    def kill(self):
+        self.kills += 1
+        self.returncode = -9
+
+
+async def test_run_semgrep_kills_proc_on_timeout(monkeypatch):
+    import asyncio as aio
+
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def hang():
+        await aio.sleep(10)
+        return (b"", b"")
+
+    proc = _FakeProc(hang)
+
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    res = await sec.run_semgrep({"a.py": "x"}, timeout=0.01)
+    assert res is None
+    assert proc.kills == 1  # finally killed the timed-out scan
+
+
+async def test_run_semgrep_kills_proc_on_cancel(monkeypatch):
+    import asyncio as aio
+
+    monkeypatch.setattr(sec, "semgrep_installed", lambda: True)
+
+    async def cancelled():
+        raise aio.CancelledError()
+
+    proc = _FakeProc(cancelled)
+
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr(aio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(aio.CancelledError):
+        await sec.run_semgrep({"a.py": "x"})
+    assert proc.kills == 1  # outer cancellation still reaps the subprocess
+
+
 # ── default model wiring ─────────────────────────────────────────────────────
 
 def test_default_model_is_sonnet():
