@@ -32,6 +32,9 @@ class PRCheck(Base):
     check_results: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     summary: Mapped[str | None] = mapped_column(String, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(nullable=True)
+    # Full AgentResult when the review agent ran: assessment, trace, stopped_for,
+    # token counts. Null when the agent is disabled for the repo or didn't run.
+    agent_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     action_taken: Mapped[str | None] = mapped_column(String(50), nullable=True)
     comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
