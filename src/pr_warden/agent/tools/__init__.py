@@ -7,6 +7,7 @@ from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
 from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
+from pr_warden.agent.tools.search_code import SearchCodeTool
 
 DONE_TOOL = "done"
 
@@ -22,6 +23,7 @@ def build_tools() -> list[Tool]:
         GetRepoConventionsTool(),
         GetAuthorHistoryTool(),
         CheckSecurityPatternsTool(),
+        SearchCodeTool(),
         DoneTool(),
     ]
 

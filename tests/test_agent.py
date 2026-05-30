@@ -12,6 +12,7 @@ from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
 from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
+from pr_warden.agent.tools.search_code import SearchCodeTool, search_in_source
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 
 
@@ -101,6 +102,7 @@ def test_build_tools_includes_done():
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
+        "search_code",
     } <= names
 
 
@@ -590,6 +592,108 @@ async def test_security_tool_scanner_error(monkeypatch):
 
 def test_security_tool_has_extended_timeout():
     assert sec.CheckSecurityPatternsTool.timeout_s > 15
+
+
+# ── search_code ──────────────────────────────────────────────────────────────
+
+def test_search_in_source_literal():
+    import re
+
+    src = "import os\nlogin()\n# login mention\n"
+    matcher = re.compile(re.escape("login"))
+    hits = search_in_source(src, matcher, "a.py")
+    assert hits == ["a.py:2: login()", "a.py:3: # login mention"]  # text match incl. comments
+
+
+def test_search_in_source_truncates_long_lines():
+    import re
+
+    src = "x" + "y" * 500 + "\n"
+    hits = search_in_source(src, re.compile("x"), "a.py")
+    assert hits[0].endswith("…") and len(hits[0]) < 260
+
+
+async def test_search_code_literal(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["a.py", "b.py", "logo.png"]
+
+    files = {"a.py": "do_login()\n", "b.py": "x = 1\nDO_LOGIN = 2\n"}
+
+    async def fake_file(token, repo, path, ref=None):
+        return files.get(path)
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await SearchCodeTool().run(_ctx(), SearchCodeTool.input_schema(query="login"))
+    assert res.ok
+    assert "a.py:1: do_login()" in res.content
+    assert "b.py:2:" in res.content        # case-insensitive literal match
+    assert "logo.png" not in res.content   # binary suffix skipped
+
+
+async def test_search_code_regex_and_file_pattern(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["a.py", "notes.md"]
+
+    files = {"a.py": "TODO: fix\nfoo123bar\n", "notes.md": "TODO: docs\n"}
+
+    async def fake_file(token, repo, path, ref=None):
+        return files.get(path)
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await SearchCodeTool().run(
+        _ctx(),
+        SearchCodeTool.input_schema(query=r"\d{3}", is_regex=True, file_pattern="*.py"),
+    )
+    assert res.ok
+    assert "foo123bar" in res.content
+    assert "notes.md" not in res.content   # filtered out by file_pattern
+
+
+async def test_search_code_bad_regex():
+    res = await SearchCodeTool().run(
+        _ctx(), SearchCodeTool.input_schema(query="(", is_regex=True)
+    )
+    assert not res.ok and res.error == "bad_regex"
+
+
+async def test_search_code_no_matches(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["a.py"]
+
+    async def fake_file(token, repo, path, ref=None):
+        return "x = 1\n"
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await SearchCodeTool().run(_ctx(), SearchCodeTool.input_schema(query="zzz"))
+    assert res.ok and "No matches" in res.content
+
+
+async def test_search_code_caps_results(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["a.py"]
+
+    async def fake_file(token, repo, path, ref=None):
+        return "\n".join("hit" for _ in range(50))
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await SearchCodeTool().run(
+        _ctx(), SearchCodeTool.input_schema(query="hit", max_results=5)
+    )
+    assert res.ok
+    assert res.metadata["hits"] == 5
+    assert "capped at 5" in res.content
 
 
 # ── default model wiring ─────────────────────────────────────────────────────
