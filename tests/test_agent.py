@@ -696,6 +696,26 @@ async def test_search_code_caps_results(monkeypatch):
     assert "capped at 5" in res.content
 
 
+async def test_search_code_skips_oversized_file(monkeypatch):
+    from pr_warden.agent.tools import search_code as sc
+    from pr_warden.github import client
+
+    async def fake_tree(token, repo, branch="HEAD"):
+        return ["big.py", "small.py"]
+
+    files = {"big.py": "needle\n" * 200_000, "small.py": "needle\n"}  # big.py > 512KB
+
+    async def fake_file(token, repo, path, ref=None):
+        return files.get(path)
+
+    monkeypatch.setattr(client, "list_repo_tree", fake_tree)
+    monkeypatch.setattr(client, "get_repo_file", fake_file)
+    res = await sc.SearchCodeTool().run(_ctx(), sc.SearchCodeTool.input_schema(query="needle"))
+    assert res.ok
+    assert "small.py:1:" in res.content
+    assert "big.py" not in res.content        # oversized file skipped, not scanned
+
+
 # ── default model wiring ─────────────────────────────────────────────────────
 
 def test_default_model_is_sonnet():

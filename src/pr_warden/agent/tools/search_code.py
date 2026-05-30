@@ -26,6 +26,7 @@ from pr_warden.github import client
 _MAX_FILES = 60          # text files fetched per call
 _MAX_RESULTS = 100       # hard cap on hits returned
 _MAX_LINE_LEN = 200      # truncate long matched lines so one hit isn't a wall
+_MAX_FILE_BYTES = 512_000  # skip very large files — bounds scan work per file
 
 # Binary / non-source extensions we never want to grep through.
 _SKIP_SUFFIXES = (
@@ -54,6 +55,40 @@ def search_in_source(
                 text = text[:_MAX_LINE_LEN] + " …"
             hits.append(f"{path}:{n}: {text}")
     return hits
+
+
+def _scan_files(
+    capped: list[str],
+    contents: list,
+    matcher: re.Pattern[str],
+    limit: int,
+) -> tuple[list[str], int, bool]:
+    """Synchronous scan over fetched files. Returns (hits, files_with_hits, capped).
+
+    Runs on a worker thread (see `run`): regex matching is CPU-bound with no
+    await points, so doing it on the event loop would block every other request
+    and make the loop's per-tool timeout impossible to honour — a
+    catastrophic-backtracking pattern from the model would freeze the server.
+    Off-thread, the timeout fires and the service stays responsive.
+    """
+    hits: list[str] = []
+    files_with_hits = 0
+    capped_results = False
+    for path, content in zip(capped, contents):
+        if not isinstance(content, str) or len(content) > _MAX_FILE_BYTES:
+            continue
+        found = search_in_source(content, matcher, path)
+        if not found:
+            continue
+        files_with_hits += 1
+        for h in found:
+            hits.append(h)
+            if len(hits) >= limit:
+                capped_results = True
+                break
+        if capped_results:
+            break
+    return hits, files_with_hits, capped_results
 
 
 class SearchCodeInput(ToolInput):
@@ -116,23 +151,11 @@ you want literal/regex matching. Scans a bounded number of files."""
         )
 
         limit = max(1, min(input.max_results, _MAX_RESULTS))
-        hits: list[str] = []
-        files_with_hits = 0
-        capped_results = False
-        for path, content in zip(capped, contents):
-            if not isinstance(content, str):
-                continue
-            found = search_in_source(content, pattern, path)
-            if not found:
-                continue
-            files_with_hits += 1
-            for h in found:
-                hits.append(h)
-                if len(hits) >= limit:
-                    capped_results = True
-                    break
-            if capped_results:
-                break
+        # Scan off the event loop: see _scan_files. Keeps the server responsive
+        # and lets the loop's per-tool timeout cancel a pathological pattern.
+        hits, files_with_hits, capped_results = await asyncio.to_thread(
+            _scan_files, capped, list(contents), pattern, limit
+        )
 
         if not hits:
             return ToolResult(
