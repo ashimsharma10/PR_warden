@@ -12,6 +12,7 @@ from pr_warden.agent.tools.get_file import GetFileTool
 from pr_warden.agent.tools.get_issue import GetIssueTool
 from pr_warden.agent.tools.get_pr_diff import GetPRDiffTool
 from pr_warden.agent.tools.get_repo_conventions import GetRepoConventionsTool
+from pr_warden.agent.tools.git_blame import GitBlameTool, _range_for_line
 from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
 
 
@@ -101,6 +102,7 @@ def test_build_tools_includes_done():
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
+        "git_blame",
     } <= names
 
 
@@ -590,6 +592,90 @@ async def test_security_tool_scanner_error(monkeypatch):
 
 def test_security_tool_has_extended_timeout():
     assert sec.CheckSecurityPatternsTool.timeout_s > 15
+
+
+# ── git_blame ────────────────────────────────────────────────────────────────
+
+def _blame_range(start, end, login="alice", number=12):
+    return {
+        "startingLine": start,
+        "endingLine": end,
+        "commit": {
+            "oid": "abc1234567",
+            "messageHeadline": "fix race condition",
+            "committedDate": "2026-05-01T10:00:00Z",
+            "author": {"name": "Alice A", "user": {"login": login}},
+            "associatedPullRequests": {"nodes": [{"number": number, "title": "Fix race"}]},
+        },
+    }
+
+
+def test_range_for_line_selects_covering_range():
+    ranges = [_blame_range(1, 3), _blame_range(4, 10)]
+    assert _range_for_line(ranges, 5) is ranges[1]
+    assert _range_for_line(ranges, 99) is None
+
+
+async def test_git_blame_hit(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_blame(token, repo, path, ref=None):
+        return [_blame_range(1, 20)]
+
+    monkeypatch.setattr(client, "get_blame", fake_blame)
+    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=5))
+    assert res.ok
+    assert "last changed by alice" in res.content
+    assert "fix race condition" in res.content
+    assert "PR #12" in res.content
+    assert res.metadata["sha"] == "abc1234567"
+
+
+async def test_git_blame_out_of_range(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_blame(token, repo, path, ref=None):
+        return [_blame_range(1, 3)]
+
+    monkeypatch.setattr(client, "get_blame", fake_blame)
+    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=50))
+    assert not res.ok and res.error == "out_of_range"
+
+
+async def test_git_blame_no_blame(monkeypatch):
+    from pr_warden.github import client
+
+    async def fake_blame(token, repo, path, ref=None):
+        return None
+
+    monkeypatch.setattr(client, "get_blame", fake_blame)
+    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="new.py", line=1))
+    assert not res.ok and res.error == "not_found"
+
+
+async def test_git_blame_graphql_failure_not_fatal(monkeypatch):
+    from pr_warden.github import client
+
+    async def boom(token, repo, path, ref=None):
+        raise RuntimeError("graphql down")
+
+    monkeypatch.setattr(client, "get_blame", boom)
+    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=1))
+    assert not res.ok and res.error == "blame_failed"
+
+
+async def test_git_blame_falls_back_to_author_name(monkeypatch):
+    from pr_warden.github import client
+
+    rng = _blame_range(1, 5)
+    rng["commit"]["author"]["user"] = None  # no linked GitHub account
+
+    async def fake_blame(token, repo, path, ref=None):
+        return [rng]
+
+    monkeypatch.setattr(client, "get_blame", fake_blame)
+    res = await GitBlameTool().run(_ctx(), GitBlameTool.input_schema(path="a.py", line=2))
+    assert res.ok and "Alice A" in res.content
 
 
 # ── default model wiring ─────────────────────────────────────────────────────
