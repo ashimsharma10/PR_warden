@@ -17,13 +17,16 @@ class DoneTool:
 assessment. Call this with your structured output. After this is called, no more
 tools will be invoked.
 
-Only call this when:
-- You understand what the PR does
-- You've checked the linked issue (if any) actually relates
-- You've identified anything notable for the reviewer
+Before calling this, make sure:
+- Your `summary` describes what the diff actually changes (not just what the PR
+  description claims).
+- Every item in `notable` is something you verified from the diff or a tool, with
+  a citation (path:line, file, issue, or which tool confirmed it).
+- Anything you suspect but could NOT verify is in `open_questions`, not `notable`.
+- `confidence` honestly reflects how much of your assessment is backed by evidence.
 
-If you're uncertain about something, put it in `open_questions` rather than
-skipping it."""
+When in doubt, prefer "I could not verify X — please check" in `open_questions`
+over a confident guess. Admitting uncertainty is correct; guessing is not."""
     input_schema = DoneInput
 
     async def run(self, ctx, input: DoneInput) -> ToolResult:  # pragma: no cover
