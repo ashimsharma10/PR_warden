@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 import structlog
 
-from pr_warden.checks.registry import CheckContext, CheckResult, register
+from pr_warden.checks.registry import CheckContext, CheckResult, Severity, register
 
 log = structlog.get_logger()
 
@@ -205,7 +205,7 @@ def _critical_path_match(filepath: str, glob: str) -> bool:
 # ── Checks ────────────────────────────────────────────────────────────────────
 
 
-@register
+@register(Severity.LOW)
 def check_shared_code(ctx: CheckContext) -> CheckResult | None:
     """Heuristic: flags source files living in conventionally-shared directories.
 
@@ -246,7 +246,7 @@ def check_shared_code(ctx: CheckContext) -> CheckResult | None:
     )
 
 
-@register
+@register(Severity.HIGH)
 def check_critical_path(ctx: CheckContext) -> CheckResult | None:
     """Deterministic: flags any PR that touches repo-declared critical-path globs.
 
@@ -287,7 +287,7 @@ def check_critical_path(ctx: CheckContext) -> CheckResult | None:
     )
 
 
-@register
+@register(Severity.MEDIUM)
 def check_codeowners(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.codeowners
     if not cfg.enabled:
@@ -333,7 +333,7 @@ def check_codeowners(ctx: CheckContext) -> CheckResult | None:
     return CheckResult("codeowners", True, info)
 
 
-@register
+@register(Severity.HIGH)
 def check_secret_leak(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.secret_leak.enabled:
         return None

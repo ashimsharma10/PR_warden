@@ -1,5 +1,5 @@
 from pr_warden.agent.schemas import DoneInput
-from pr_warden.checks.registry import CheckResult
+from pr_warden.checks.registry import CheckResult, Severity
 from pr_warden.composer import (
     LABEL_CLEAN,
     LABEL_NEEDS_ATTENTION,
@@ -47,8 +47,10 @@ def test_comment_all_passed_no_reasons():
         CheckResult("pr_size", True, "4 files, 100 lines"),
     ]
     comment = build_comment(results)
-    assert comment.count("✅") == 3
+    # 3 passing rows each carry ✅, plus the "Clean" banner's ✅.
+    assert comment.count("✅") == 4
     assert "❌" not in comment
+    assert "all checks passed" in comment
 
 
 def test_comment_mixed():
@@ -115,3 +117,112 @@ def test_pick_label_any_fail():
 def test_pick_label_all_fail():
     results = [CheckResult("a", False, "x"), CheckResult("b", False, "y")]
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+# ── Severity tiering ──────────────────────────────────────────────────────────
+
+
+def test_pick_label_low_only_failure_stays_clean():
+    # A hygiene nit alone must not flip the PR to needs-attention.
+    results = [
+        CheckResult("branch_naming", False, "bad branch", severity=Severity.LOW),
+        CheckResult("secret_leak", True, "", severity=Severity.HIGH),
+    ]
+    assert pick_label(results) == LABEL_CLEAN
+
+
+def test_pick_label_medium_failure_needs_attention():
+    results = [CheckResult("no_tests", False, "no tests", severity=Severity.MEDIUM)]
+    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+def test_pick_label_high_failure_needs_attention():
+    results = [
+        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
+    ]
+    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+def test_banner_advisory_only_says_clean():
+    results = [CheckResult("branch_naming", False, "nit", severity=Severity.LOW)]
+    comment = build_comment(results)
+    assert "advisory only" in comment
+    assert "does not affect status" in comment
+
+
+def test_banner_high_severity_flagged():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    comment = build_comment(results)
+    assert "Needs attention" in comment
+    assert "1 high" in comment
+
+
+def test_comment_has_severity_column_and_orders_high_first():
+    results = [
+        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
+    ]
+    comment = build_comment(results)
+    assert "Severity" in comment
+    # High-severity failure must appear before the low-severity one.
+    assert comment.index("Secret Leak") < comment.index("Branch Naming")
+
+
+def _lows(n: int) -> list:
+    return [CheckResult(f"nit{i}", False, "x", severity=Severity.LOW) for i in range(n)]
+
+
+def test_advisory_pile_escalates_at_default_threshold():
+    # 3 advisory failures (the slop signature) → needs-attention by default.
+    assert pick_label(_lows(3)) == LABEL_NEEDS_ATTENTION
+
+
+def test_advisory_below_threshold_stays_clean():
+    assert pick_label(_lows(2)) == LABEL_CLEAN
+
+
+def test_advisory_threshold_is_configurable():
+    # Maintainer tightens it: 2 advisories now escalates.
+    assert pick_label(_lows(2), advisory_threshold=2) == LABEL_NEEDS_ATTENTION
+    # ...or loosens it: 4 needed.
+    assert pick_label(_lows(3), advisory_threshold=4) == LABEL_CLEAN
+
+
+def test_advisory_escalation_can_be_disabled():
+    # threshold None disables the rule entirely — any number of advisories is clean.
+    assert pick_label(_lows(10), advisory_threshold=None) == LABEL_CLEAN
+
+
+def test_banner_explains_advisory_escalation():
+    comment = build_comment(_lows(3))
+    assert "Needs attention" in comment
+    assert "advisories escalates" in comment
+
+
+def test_banner_no_escalation_note_when_real_flag_present():
+    results = _lows(3) + [CheckResult("secret_leak", False, "key", severity=Severity.HIGH)]
+    comment = build_comment(results)
+    assert "Needs attention" in comment
+    assert "advisories escalates" not in comment  # escalation note only when nits alone
+
+
+def test_advisory_escalation_config_defaults():
+    from pr_warden.repo_config import DEFAULT_CONFIG, parse_config
+
+    assert DEFAULT_CONFIG.advisory_escalation.enabled is True
+    assert DEFAULT_CONFIG.advisory_escalation.threshold == 3
+
+    cfg = parse_config("advisory_escalation:\n  threshold: 5\n  enabled: false\n")
+    assert cfg.advisory_escalation.threshold == 5
+    assert cfg.advisory_escalation.enabled is False
+
+
+def test_run_checks_stamps_registered_severity():
+    from pr_warden.checks.registry import Severity, run_checks, _registry
+
+    by_name = {fn.__name__.replace("check_", ""): sev for fn, sev in _registry}
+    assert by_name["secret_leak"] == Severity.HIGH
+    assert by_name["critical_path"] == Severity.HIGH
+    assert by_name["no_tests"] == Severity.MEDIUM
+    assert by_name["branch_naming"] == Severity.LOW

@@ -1,13 +1,13 @@
 import re
 
-from pr_warden.checks.registry import CheckContext, CheckResult, register
+from pr_warden.checks.registry import CheckContext, CheckResult, Severity, register
 
 # ── Existing quality gates ─────────────────────────────────────────────────────
 
 _GENERIC_TITLES = {"fix", "update", "wip", "hotfix", "patch", "changes", "stuff", "misc"}
 
 
-@register
+@register(Severity.LOW)
 def check_title_quality(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.title_quality.enabled:
         return None
@@ -22,7 +22,7 @@ def check_title_quality(ctx: CheckContext) -> CheckResult | None:
     return CheckResult("title_quality", True, "")
 
 
-@register
+@register(Severity.LOW)
 def check_description(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.description
     if not cfg.enabled:
@@ -36,7 +36,7 @@ def check_description(ctx: CheckContext) -> CheckResult | None:
     return CheckResult("description", True, "")
 
 
-@register
+@register(Severity.LOW)
 def check_pr_size(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.pr_size
     if not cfg.enabled:
@@ -59,7 +59,7 @@ def check_pr_size(ctx: CheckContext) -> CheckResult | None:
     )
 
 
-@register
+@register(Severity.LOW)
 def check_branch_naming(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.branch_naming
     if not cfg.enabled:
@@ -74,7 +74,7 @@ def check_branch_naming(ctx: CheckContext) -> CheckResult | None:
     return CheckResult("branch_naming", True, "")
 
 
-@register
+@register(Severity.LOW)
 def check_self_merge(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.self_merge.enabled:
         return None
@@ -90,7 +90,7 @@ def check_self_merge(ctx: CheckContext) -> CheckResult | None:
 # ── Anti-slop: AI fingerprints ─────────────────────────────────────────────────
 
 
-@register
+@register(Severity.LOW)
 def check_ai_branch(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.ai_branch
     if not cfg.enabled:
@@ -112,7 +112,7 @@ _AI_FOOTER_RE = re.compile(
 )
 
 
-@register
+@register(Severity.LOW)
 def check_ai_commit_footer(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.ai_commit_footer.enabled:
         return None
@@ -140,7 +140,7 @@ _BOILERPLATE_RES = [
 ]
 
 
-@register
+@register(Severity.LOW)
 def check_boilerplate_description(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.boilerplate_description.enabled:
         return None
@@ -157,7 +157,7 @@ def check_boilerplate_description(ctx: CheckContext) -> CheckResult | None:
 # ── Anti-slop: description too thin for the diff ──────────────────────────────
 
 
-@register
+@register(Severity.MEDIUM)
 def check_description_vs_diff(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.description_vs_diff
     if not cfg.enabled:

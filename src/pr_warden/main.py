@@ -194,11 +194,15 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         config = await _load_repo_config(token, repo)
         ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
-        label = pick_label(results)
+        esc = config.advisory_escalation
+        advisory_threshold = esc.threshold if esc.enabled else None
+        label = pick_label(results, advisory_threshold=advisory_threshold)
 
         agent_result = await _maybe_run_agent(token, repo, event, ctx.files)
         agent_assessment = agent_result.assessment if agent_result else None
-        comment_body = build_comment(results, agent=agent_assessment)
+        comment_body = build_comment(
+            results, agent=agent_assessment, advisory_threshold=advisory_threshold
+        )
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
