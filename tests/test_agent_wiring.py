@@ -176,7 +176,7 @@ async def test_handle_pr_event_serializes_concurrent_comment_creation(monkeypatc
     monkeypatch.setattr(main, "_load_repo_config", fake_cfg)
     monkeypatch.setattr(main, "_build_check_context", fake_ctx)
     monkeypatch.setattr(main, "run_checks", lambda ctx: [])
-    monkeypatch.setattr(main, "build_comment", lambda results, agent=None: "body")
+    monkeypatch.setattr(main, "build_comment", lambda results, agent=None, **kw: "body")
     monkeypatch.setattr(main, "_maybe_run_agent", no_agent)
 
     created, updated = [], []

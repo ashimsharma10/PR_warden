@@ -120,9 +120,27 @@ class ChecksConfig(BaseModel):
     secret_leak: SecretLeakConfig = SecretLeakConfig()
 
 
+class AdvisoryEscalationConfig(BaseModel):
+    """When enough low-severity (advisory) checks fail at once, escalate.
+
+    A single hygiene nit shouldn't flip a PR to needs-attention — but a pile of
+    them together is the signature of a low-effort / slop PR (AI branch + AI
+    commit footer + boilerplate description + lock-file-only churn, say). This
+    rule re-flags that case without making any individual advisory noisy.
+
+    threshold = N: N or more failing advisory checks escalates the PR to
+    needs-attention. Set `enabled: false` (or a very high threshold) to turn the
+    escalation off entirely.
+    """
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool = True
+    threshold: int = 3
+
+
 class RepoConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     checks: ChecksConfig = ChecksConfig()
+    advisory_escalation: AdvisoryEscalationConfig = AdvisoryEscalationConfig()
 
 
 DEFAULT_CONFIG = RepoConfig()
