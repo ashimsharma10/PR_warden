@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv2/
 dist/
 *.egg-info/
 .mypy_cache/
+.DS_Store
