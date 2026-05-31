@@ -1,5 +1,5 @@
 <h1>
-  <img src="assets/prwarden-logo.png" alt="PR Warden logo" width="70" align="middle">
+  <img src="assets/prwarden-logo-circle.png" alt="PR Warden logo" width="70" align="middle">
   &nbsp;PR Warden
 </h1>
 
