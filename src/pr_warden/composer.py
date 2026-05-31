@@ -44,19 +44,17 @@ def _needs_attention(
 
 
 def _format_attention(items: list[AttentionItem]) -> list[str]:
-    """Render the attention map: the top 3 spots, ranked by risk × centrality.
+    """Render the top 3 spots to look at, ranked by risk × centrality.
 
     Numbered (not bulleted) because the order is the message — spot #1 is where a
-    30-second maintainer should look first. Sorting is stable, so the agent's own
-    ordering breaks ties between items of equal priority.
+    30-second maintainer should look first. The rank is computed from each item's
+    risk × centrality but kept out of the comment to stay terse; sorting is stable,
+    so the agent's own ordering breaks ties between items of equal priority.
     """
     ranked = sorted(items, key=lambda it: -it.priority)[:3]
-    lines = ["\n**👀 Attention map** — ranked by risk × centrality:"]
+    lines = ["\n**Where to focus:**"]
     for i, it in enumerate(ranked, 1):
-        lines.append(
-            f"{i}. `{it.location}` — {it.why} "
-            f"_(risk {it.risk} · centrality {it.centrality})_"
-        )
+        lines.append(f"{i}. `{it.location}` — {it.why}")
     return lines
 
 
@@ -72,8 +70,10 @@ def format_agent_assessment(assessment: DoneInput) -> str:
         lines += _format_attention(assessment.attention)
 
     if assessment.open_questions:
+        # Cap at 2 — a focused comment asks the one or two things that matter,
+        # not a checklist. The agent already orders these most-important first.
         lines.append("\n**Open questions:**")
-        lines += [f"- {q}" for q in assessment.open_questions]
+        lines += [f"- {q}" for q in assessment.open_questions[:2]]
 
     lines.append(f"\n*Confidence: {assessment.confidence:.0%}*")
     return "\n".join(lines)
@@ -86,31 +86,26 @@ def build_comment(
     *,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
 ) -> str:
-    # Failures first, highest severity first; passing checks keep their order
-    # after. A maintainer should see a leaked secret before a branch-name nit.
-    ordered = sorted(
-        results,
-        key=lambda r: (r.passed, -int(r.severity)),
-    )
+    # Only failures get a table — a maintainer wants the short list of what
+    # tripped, not a roll-call of everything that passed. Every row is a failure,
+    # so the status column is dropped; highest severity first.
+    failed = sorted((r for r in results if not r.passed), key=lambda r: -int(r.severity))
 
-    rows = []
-    for r in ordered:
-        icon = "✅" if r.passed else "❌"
-        # Severity is only meaningful for a failure; a passing check is just "—".
-        sev = _SEVERITY_BADGE[r.severity] if not r.passed else "—"
-        detail = r.reason if not r.passed else "—"
-        name = r.name.replace("_", " ").title()
-        rows.append(f"| {name} | {icon} | {sev} | {detail} |")
+    parts = ["## PRwarden Review\n", _status_banner(results, advisory_threshold)]
 
-    table = "\n".join(
-        [
-            "| Check | Status | Severity | Detail |",
-            "|-------|--------|----------|--------|",
-            *rows,
+    if failed:
+        rows = [
+            f"| {r.name.replace('_', ' ').title()} | {_SEVERITY_BADGE[r.severity]} | {r.reason} |"
+            for r in failed
         ]
-    )
-
-    parts = ["## PRwarden Review\n", _status_banner(results, advisory_threshold), "", table]
+        table = "\n".join(
+            [
+                "| Check | Severity | Detail |",
+                "|-------|----------|--------|",
+                *rows,
+            ]
+        )
+        parts += ["", table]
 
     if summary:
         parts.append(f"\n### Summary\n{summary}")

@@ -40,35 +40,36 @@ def test_comment_shows_pass_icon():
     assert "✅" in build_comment(results)
 
 
-def test_comment_shows_fail_icon_and_reason():
+def test_comment_failed_check_listed_with_reason():
     results = [CheckResult("title_quality", False, "Title is a single word")]
     comment = build_comment(results)
-    assert "❌" in comment
+    assert "Title Quality" in comment
     assert "Title is a single word" in comment
 
 
-def test_comment_all_passed_no_reasons():
+def test_comment_all_passed_no_table():
     results = [
         CheckResult("title_quality", True, ""),
         CheckResult("description", True, ""),
         CheckResult("pr_size", True, "4 files, 100 lines"),
     ]
     comment = build_comment(results)
-    # 3 passing rows each carry ✅, plus the "Clean" banner's ✅.
-    assert comment.count("✅") == 4
+    # Passing checks are not listed — only the "Clean" banner's single ✅.
+    assert comment.count("✅") == 1
     assert "❌" not in comment
     assert "all checks passed" in comment
+    assert "4 files, 100 lines" not in comment  # passing-check detail omitted
 
 
-def test_comment_mixed():
+def test_comment_mixed_lists_only_failure():
     results = [
         CheckResult("title_quality", False, "Generic single-word title"),
         CheckResult("description", True, ""),
     ]
     comment = build_comment(results)
-    assert "✅" in comment
-    assert "❌" in comment
+    assert "Title Quality" in comment
     assert "Generic single-word title" in comment
+    assert "Description" not in comment  # the passing check is omitted
 
 
 def test_comment_includes_summary():
@@ -88,7 +89,7 @@ def test_comment_includes_agent_section():
     comment = build_comment(results, agent=_assessment())
     assert "### Agent Review" in comment
     assert "Guards the charge" in comment
-    assert "Attention map" in comment
+    assert "Where to focus" in comment
     assert "payments.py:42" in comment
     assert "double-charge would be silent" in comment
     assert "Confidence: 80%" in comment
@@ -141,6 +142,22 @@ def test_attention_map_tie_preserves_agent_order():
         _assessment(attention=[_item("first.py:1", "medium", "medium"), _item("second.py:2", "medium", "medium")])
     )
     assert out.index("first.py:1") < out.index("second.py:2")
+
+
+def test_open_questions_capped_at_two():
+    out = format_agent_assessment(
+        _assessment(open_questions=["first q", "second q", "third q"])
+    )
+    assert "first q" in out
+    assert "second q" in out
+    assert "third q" not in out  # only the top 2 are kept
+
+
+def test_attention_map_omits_risk_centrality_suffix():
+    # The comment stays terse: ranking drives order, but the raw ratings are not printed.
+    out = format_agent_assessment(_assessment())
+    assert "risk" not in out.lower()
+    assert "centrality" not in out.lower()
 
 
 def test_attention_item_normalizes_case():
