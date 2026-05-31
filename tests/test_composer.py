@@ -1,5 +1,5 @@
 from pr_warden.agent.schemas import DoneInput
-from pr_warden.checks.registry import CheckResult
+from pr_warden.checks.registry import CheckResult, Severity
 from pr_warden.composer import (
     LABEL_CLEAN,
     LABEL_NEEDS_ATTENTION,
@@ -47,8 +47,10 @@ def test_comment_all_passed_no_reasons():
         CheckResult("pr_size", True, "4 files, 100 lines"),
     ]
     comment = build_comment(results)
-    assert comment.count("✅") == 3
+    # 3 passing rows each carry ✅, plus the "Clean" banner's ✅.
+    assert comment.count("✅") == 4
     assert "❌" not in comment
+    assert "all checks passed" in comment
 
 
 def test_comment_mixed():
@@ -115,3 +117,63 @@ def test_pick_label_any_fail():
 def test_pick_label_all_fail():
     results = [CheckResult("a", False, "x"), CheckResult("b", False, "y")]
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+# ── Severity tiering ──────────────────────────────────────────────────────────
+
+
+def test_pick_label_low_only_failure_stays_clean():
+    # A hygiene nit alone must not flip the PR to needs-attention.
+    results = [
+        CheckResult("branch_naming", False, "bad branch", severity=Severity.LOW),
+        CheckResult("secret_leak", True, "", severity=Severity.HIGH),
+    ]
+    assert pick_label(results) == LABEL_CLEAN
+
+
+def test_pick_label_medium_failure_needs_attention():
+    results = [CheckResult("no_tests", False, "no tests", severity=Severity.MEDIUM)]
+    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+def test_pick_label_high_failure_needs_attention():
+    results = [
+        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
+    ]
+    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+def test_banner_advisory_only_says_clean():
+    results = [CheckResult("branch_naming", False, "nit", severity=Severity.LOW)]
+    comment = build_comment(results)
+    assert "advisory only" in comment
+    assert "does not affect status" in comment
+
+
+def test_banner_high_severity_flagged():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    comment = build_comment(results)
+    assert "Needs attention" in comment
+    assert "1 high" in comment
+
+
+def test_comment_has_severity_column_and_orders_high_first():
+    results = [
+        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
+    ]
+    comment = build_comment(results)
+    assert "Severity" in comment
+    # High-severity failure must appear before the low-severity one.
+    assert comment.index("Secret Leak") < comment.index("Branch Naming")
+
+
+def test_run_checks_stamps_registered_severity():
+    from pr_warden.checks.registry import Severity, run_checks, _registry
+
+    by_name = {fn.__name__.replace("check_", ""): sev for fn, sev in _registry}
+    assert by_name["secret_leak"] == Severity.HIGH
+    assert by_name["critical_path"] == Severity.HIGH
+    assert by_name["no_tests"] == Severity.MEDIUM
+    assert by_name["branch_naming"] == Severity.LOW
