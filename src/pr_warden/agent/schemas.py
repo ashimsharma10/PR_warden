@@ -26,13 +26,40 @@ class ToolResult(BaseModel):
 class DoneInput(ToolInput):
     """The agent's final structured assessment — the `done` tool's arguments."""
 
-    summary: str
-    files_touched: list[str] = Field(default_factory=list)
-    intent_matches_diff: bool
-    intent_mismatch_reason: str = ""
-    notable: list[str] = Field(default_factory=list)
-    open_questions: list[str] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0)
+    summary: str = Field(
+        description="1-2 sentences on what the diff actually changes, grounded in "
+        "the code you read — not a restatement of the PR description."
+    )
+    files_touched: list[str] = Field(
+        default_factory=list,
+        description="High-level areas affected, e.g. [\"auth\", \"tests\"].",
+    )
+    intent_matches_diff: bool = Field(
+        description="Does the diff actually do what the PR/issue claims? Only set "
+        "false when you can point to the specific discrepancy."
+    )
+    intent_mismatch_reason: str = Field(
+        default="",
+        description="Empty if intent matches; otherwise the concrete reason with a "
+        "citation (path:line, file, or issue).",
+    )
+    notable: list[str] = Field(
+        default_factory=list,
+        description="Up to 3 things worth a second look, each VERIFIED from the diff "
+        "or a tool and cited. No speculation — unverified concerns go in "
+        "open_questions instead.",
+    )
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description="Everything you could not confirm, phrased as specific things "
+        "for the maintainer to check. Put uncertainty here; do not guess.",
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="0.0-1.0, honestly reflecting how much of this assessment is "
+        "backed by evidence you read versus inference. Lower it when unsure.",
+    )
 
 
 class AgentResult(BaseModel):
