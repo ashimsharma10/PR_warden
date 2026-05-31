@@ -76,7 +76,14 @@ _DONE_ARGS = {
     "files_touched": ["payments"],
     "intent_matches_diff": True,
     "intent_mismatch_reason": "",
-    "notable": ["No test added for the retry path"],
+    "attention": [
+        {
+            "location": "payments.py:42",
+            "why": "No test covers the retry path; a double-charge would be silent",
+            "risk": "high",
+            "centrality": "medium",
+        }
+    ],
     "open_questions": [],
     "confidence": 0.8,
 }

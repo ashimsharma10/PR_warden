@@ -7,9 +7,13 @@ or cache status — they clutter its reasoning without helping it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Risk and centrality each map to a weight; an item's rank is their product, so a
+# high-risk change in load-bearing code (3×3=9) outranks a high-risk leaf (3×1=3).
+_RANK_WEIGHT = {"high": 3, "medium": 2, "low": 1}
 
 
 class ToolInput(BaseModel):
@@ -21,6 +25,44 @@ class ToolResult(BaseModel):
     content: str                            # what the agent sees
     error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)  # logging only; never shown
+
+
+class AttentionItem(BaseModel):
+    """One spot on the attention map: where to look, why, and how it ranks.
+
+    Splits the rank into two axes the model scores independently — `risk` (how
+    likely this is to be wrong/harmful) and `centrality` (how load-bearing the
+    code is). The composer orders the map by their product so the maintainer's
+    eyeballs land on the highest-leverage spot first.
+    """
+
+    location: str = Field(
+        description="Where to look — `path:line`, a file, or an issue ref. The "
+        "concrete anchor for the claim, never a vague area name."
+    )
+    why: str = Field(
+        description="One line: why a maintainer must look here, naming the "
+        "downstream impact (what depends on this, what breaks) — not a restatement "
+        "of the code."
+    )
+    risk: Literal["high", "medium", "low"] = Field(
+        description="How likely this is to be wrong or harmful if it ships unreviewed."
+    )
+    centrality: Literal["high", "medium", "low"] = Field(
+        description="How load-bearing the touched code is — how much of the system "
+        "depends on it."
+    )
+
+    @field_validator("risk", "centrality", mode="before")
+    @classmethod
+    def _normalize(cls, v: Any) -> Any:
+        # Accept "High"/" LOW " without bouncing the whole `done` call back for a
+        # retry over capitalization the model would otherwise have to re-emit.
+        return v.lower().strip() if isinstance(v, str) else v
+
+    @property
+    def priority(self) -> int:
+        return _RANK_WEIGHT[self.risk] * _RANK_WEIGHT[self.centrality]
 
 
 class DoneInput(ToolInput):
@@ -43,10 +85,11 @@ class DoneInput(ToolInput):
         description="Empty if intent matches; otherwise the concrete reason with a "
         "citation (path:line, file, or issue).",
     )
-    notable: list[str] = Field(
+    attention: list[AttentionItem] = Field(
         default_factory=list,
-        description="Up to 3 things worth a second look, each VERIFIED from the diff "
-        "or a tool and cited. No speculation — unverified concerns go in "
+        description="The attention map: up to 3 spots a maintainer must look, each "
+        "VERIFIED from the diff or a tool and cited. The comment ranks them by "
+        "risk × centrality. No speculation — unverified concerns go in "
         "open_questions instead.",
     )
     open_questions: list[str] = Field(
