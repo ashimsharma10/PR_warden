@@ -1,7 +1,7 @@
-<h1>
+<h3>
   <img src="assets/prwarden-logo.png" alt="PR Warden logo" width="70" align="middle">
   &nbsp;PR Warden
-</h1>
+</h3>
 
 A GitHub App that reviews pull requests automatically — cuts the noise so
 maintainers only look at PRs worth looking at.
