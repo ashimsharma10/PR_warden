@@ -16,6 +16,7 @@ from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
 from pr_warden.composer import (
     MANAGED_LABELS,
+    LinkContext,
     build_comment,
     pick_facet_labels,
     pick_label,
@@ -216,11 +217,22 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             agent_complete=agent_complete,
             advisory_threshold=advisory_threshold,
         )
+        # Cited `path:line` locations link straight to the line on GitHub, but
+        # only for files that actually exist here (changed files ∪ repo tree) so
+        # we never post a broken link.
+        link_ctx = LinkContext(
+            repo=repo,
+            sha=ctx.pr.head.sha,
+            known_paths=frozenset(
+                {f["filename"] for f in ctx.files} | set(ctx.repo_tree)
+            ),
+        )
         comment_body = build_comment(
             results,
             agent=agent_assessment,
             agent_complete=agent_complete,
             advisory_threshold=advisory_threshold,
+            link_ctx=link_ctx,
         )
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
