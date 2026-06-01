@@ -72,8 +72,14 @@ Call `done` exactly once, with:
   Only answer false if you can point to the specific discrepancy.
 - `intent_mismatch_reason`: empty if it matches; otherwise the concrete reason
   with a citation.
-- `notable`: up to 3 things worth a second look, each one verified and cited.
-  No speculation here — unverified concerns go in `open_questions`.
+- `attention`: the attention map — up to 3 spots a maintainer must look, each
+  verified and cited. For each: `location` (the `path:line`/file/issue anchor),
+  `why` (one line naming the downstream impact — what depends on this or what
+  breaks, not a restatement of the code), and two honest ratings the comment
+  ranks by: `risk` (how likely it is to be wrong/harmful) and `centrality` (how
+  load-bearing the touched code is). Spend these on the highest-leverage spots,
+  not the easiest-to-describe ones. No speculation — unverified concerns go in
+  `open_questions`.
 - `open_questions`: everything you couldn't confirm, phrased as specific things
   for the maintainer to check. This is where uncertainty belongs — use it freely.
 - `confidence`: 0.0–1.0, honestly reflecting how much of your assessment is

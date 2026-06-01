@@ -1,4 +1,4 @@
-from pr_warden.agent.schemas import DoneInput
+from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
 
 LABEL_CLEAN = "prwarden:clean"
@@ -43,6 +43,23 @@ def _needs_attention(
     return _advisory_escalates(failed, advisory_threshold)
 
 
+def _format_attention(items: list[AttentionItem]) -> list[str]:
+    """Render the attention map: the top 3 spots, ranked by risk × centrality.
+
+    Numbered (not bulleted) because the order is the message — spot #1 is where a
+    30-second maintainer should look first. Sorting is stable, so the agent's own
+    ordering breaks ties between items of equal priority.
+    """
+    ranked = sorted(items, key=lambda it: -it.priority)[:3]
+    lines = ["\n**👀 Attention map** — ranked by risk × centrality:"]
+    for i, it in enumerate(ranked, 1):
+        lines.append(
+            f"{i}. `{it.location}` — {it.why} "
+            f"_(risk {it.risk} · centrality {it.centrality})_"
+        )
+    return lines
+
+
 def format_agent_assessment(assessment: DoneInput) -> str:
     """Render the agent's structured assessment as a Markdown comment section."""
     lines = [assessment.summary.strip()]
@@ -51,9 +68,8 @@ def format_agent_assessment(assessment: DoneInput) -> str:
         reason = assessment.intent_mismatch_reason or "no reason given"
         lines.append(f"\n**⚠️ Intent vs. diff mismatch:** {reason}")
 
-    if assessment.notable:
-        lines.append("\n**Notable:**")
-        lines += [f"- {n}" for n in assessment.notable]
+    if assessment.attention:
+        lines += _format_attention(assessment.attention)
 
     if assessment.open_questions:
         lines.append("\n**Open questions:**")

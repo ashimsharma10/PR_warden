@@ -95,8 +95,8 @@ Tools available to the agent: `get_pr_diff`, `get_file`, `get_issue`,
 
 The `done` assessment (rendered as an "Agent Review" section in the PR comment)
 carries: a summary, files touched, whether the diff matches the stated intent
-(with a mismatch reason), notable findings, open questions, and a confidence
-score.
+(with a mismatch reason), a risk-ranked attention map (the 2–3 spots to look
+first, each with a one-line "why"), open questions, and a confidence score.
 
 ## Endpoints
 

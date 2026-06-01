@@ -52,7 +52,7 @@ def _fallback_assessment(reason: str) -> DoneInput:
         files_touched=[],
         intent_matches_diff=True,
         intent_mismatch_reason="",
-        notable=[],
+        attention=[],
         open_questions=[f"Assessment incomplete: {reason}."],
         confidence=0.0,
     )

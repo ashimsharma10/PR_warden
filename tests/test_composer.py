@@ -1,4 +1,4 @@
-from pr_warden.agent.schemas import DoneInput
+from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import CheckResult, Severity
 from pr_warden.composer import (
     LABEL_CLEAN,
@@ -15,7 +15,14 @@ def _assessment(**kwargs) -> DoneInput:
         files_touched=["payments.py"],
         intent_matches_diff=True,
         intent_mismatch_reason="",
-        notable=["No test added for the retry path"],
+        attention=[
+            AttentionItem(
+                location="payments.py:42",
+                why="No test covers the retry path; a double-charge would be silent",
+                risk="high",
+                centrality="medium",
+            )
+        ],
         open_questions=[],
         confidence=0.8,
     )
@@ -81,7 +88,9 @@ def test_comment_includes_agent_section():
     comment = build_comment(results, agent=_assessment())
     assert "### Agent Review" in comment
     assert "Guards the charge" in comment
-    assert "No test added for the retry path" in comment
+    assert "Attention map" in comment
+    assert "payments.py:42" in comment
+    assert "double-charge would be silent" in comment
     assert "Confidence: 80%" in comment
 
 
@@ -102,6 +111,43 @@ def test_format_agent_assessment_renders_open_questions():
     out = format_agent_assessment(_assessment(open_questions=["Is the lock released on error?"]))
     assert "Open questions" in out
     assert "Is the lock released on error?" in out
+
+
+# ── Attention map ─────────────────────────────────────────────────────────────
+
+
+def _item(loc: str, risk: str, centrality: str) -> AttentionItem:
+    return AttentionItem(location=loc, why="why", risk=risk, centrality=centrality)
+
+
+def test_attention_map_ranks_by_risk_times_centrality():
+    # high×high (9) must render above high×low (3), regardless of input order.
+    out = format_agent_assessment(
+        _assessment(attention=[_item("leaf.py:1", "high", "low"), _item("core.py:2", "high", "high")])
+    )
+    assert out.index("core.py:2") < out.index("leaf.py:1")
+
+
+def test_attention_map_caps_at_three():
+    items = [_item(f"f{i}.py:{i}", "low", "low") for i in range(5)]
+    out = format_agent_assessment(_assessment(attention=items))
+    assert "3. `" in out
+    assert "4. `" not in out  # only the top 3 spend the maintainer's eyeballs
+
+
+def test_attention_map_tie_preserves_agent_order():
+    # Equal priority → stable sort keeps the agent's own ordering.
+    out = format_agent_assessment(
+        _assessment(attention=[_item("first.py:1", "medium", "medium"), _item("second.py:2", "medium", "medium")])
+    )
+    assert out.index("first.py:1") < out.index("second.py:2")
+
+
+def test_attention_item_normalizes_case():
+    it = AttentionItem(location="x:1", why="y", risk="High", centrality=" LOW ")
+    assert it.risk == "high"
+    assert it.centrality == "low"
+    assert it.priority == 3
 
 
 def test_pick_label_all_pass():
