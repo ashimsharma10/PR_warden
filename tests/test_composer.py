@@ -11,6 +11,7 @@ from pr_warden.composer import (
     MANAGED_LABELS,
     build_comment,
     format_agent_assessment,
+    format_changes,
     pick_facet_labels,
     pick_label,
 )
@@ -76,6 +77,54 @@ def test_comment_mixed():
     assert "✅" in comment
     assert "❌" in comment
     assert "Generic single-word title" in comment
+
+
+# ── Since-last-review delta ───────────────────────────────────────────────────
+
+
+def _prev(**checks) -> dict:
+    # checks: name=passed_bool → the stored PRCheck.check_results shape
+    return {name: {"passed": passed, "reason": ""} for name, passed in checks.items()}
+
+
+def test_changes_flags_a_regression():
+    prev = _prev(no_tests=True)
+    curr = [CheckResult("no_tests", False, "no tests now")]
+    out = format_changes(prev, curr, "abc1234def", "fed4321cba")
+    assert out is not None
+    assert "now failing: No Tests" in out
+    assert "`abc1234` → `fed4321`" in out  # shas truncated to 7
+
+
+def test_changes_flags_a_fix():
+    prev = _prev(secret_leak=False)
+    curr = [CheckResult("secret_leak", True, "")]
+    out = format_changes(prev, curr, "aaaaaaa", "bbbbbbb")
+    assert "now resolved: Secret Leak" in out
+
+
+def test_changes_none_when_nothing_flipped():
+    prev = _prev(no_tests=False)
+    curr = [CheckResult("no_tests", False, "still failing")]
+    assert format_changes(prev, curr, "a", "b") is None
+
+
+def test_changes_reports_both_directions():
+    prev = _prev(no_tests=True, secret_leak=False)
+    curr = [CheckResult("no_tests", False, "x"), CheckResult("secret_leak", True, "")]
+    out = format_changes(prev, curr, "a1234567", "b1234567")
+    assert "now failing: No Tests" in out
+    assert "now resolved: Secret Leak" in out
+
+
+def test_comment_renders_changes_line():
+    comment = build_comment(
+        [CheckResult("title_quality", True, "")],
+        changes="**Since last review** (`a` → `b`): ❌ now failing: No Tests",
+    )
+    assert "Since last review" in comment
+    # It sits above the check table.
+    assert comment.index("Since last review") < comment.index("| Check |")
 
 
 def test_comment_has_no_separate_summary_section():

@@ -120,12 +120,46 @@ def format_agent_assessment(assessment: DoneInput) -> str:
     return "\n".join(lines)
 
 
+def format_changes(
+    prev_results: dict[str, dict],
+    curr_results: list[CheckResult],
+    prev_sha: str,
+    curr_sha: str,
+) -> str | None:
+    """A one-line "what changed since the last reviewed commit", for a returning
+    reviewer: which checks newly regressed or got resolved between the previous
+    run and this one.
+
+    Returns None when no check flipped — a re-push that touched nothing the bot
+    tracks adds no line, keeping the comment quiet. Deterministic checks only;
+    the agent's nondeterministic read is deliberately not diffed (it would flap).
+    """
+    prev_failed = {name for name, r in prev_results.items() if not r.get("passed", True)}
+    curr_failed = {r.name for r in curr_results if not r.passed}
+
+    newly_failing = sorted(curr_failed - prev_failed)
+    newly_resolved = sorted(prev_failed - curr_failed)
+    if not newly_failing and not newly_resolved:
+        return None
+
+    def _names(ns: list[str]) -> str:
+        return ", ".join(n.replace("_", " ").title() for n in ns)
+
+    bits = []
+    if newly_failing:
+        bits.append(f"❌ now failing: {_names(newly_failing)}")
+    if newly_resolved:
+        bits.append(f"✅ now resolved: {_names(newly_resolved)}")
+    return f"**Since last review** (`{prev_sha[:7]}` → `{curr_sha[:7]}`): " + " · ".join(bits)
+
+
 def build_comment(
     results: list[CheckResult],
     agent: DoneInput | None = None,
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
+    changes: str | None = None,
 ) -> str:
     # One summary, not two. The agent's summary sentence (first line of the Agent
     # Review section) is the single canonical summary. The old `### Summary`
@@ -161,7 +195,12 @@ def build_comment(
     verdict = build_verdict(
         results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
     )
-    parts = ["## PRwarden Review\n", verdict, "", table]
+    parts = ["## PRwarden Review\n", verdict]
+    if changes:
+        # Right under the verdict: a returning reviewer's first question is
+        # "what's new since my last pass?" — answer it before the details.
+        parts.append(f"\n{changes}")
+    parts += ["", table]
 
     if agent is not None:
         parts.append(f"\n### Agent Review\n{format_agent_assessment(agent)}")

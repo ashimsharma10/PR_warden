@@ -17,6 +17,7 @@ from pr_warden.checks.impact import run_gitleaks
 from pr_warden.composer import (
     MANAGED_LABELS,
     build_comment,
+    format_changes,
     pick_facet_labels,
     pick_label,
 )
@@ -216,13 +217,6 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             agent_complete=agent_complete,
             advisory_threshold=advisory_threshold,
         )
-        comment_body = build_comment(
-            results,
-            agent=agent_assessment,
-            agent_complete=agent_complete,
-            advisory_threshold=advisory_threshold,
-        )
-
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
             repo_row.cached_config = config.model_dump()
@@ -233,6 +227,29 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                 .where(PRCheck.pr_number == event.number)
                 .where(PRCheck.comment_id.isnot(None))
                 .order_by(PRCheck.created_at.desc())
+            )
+
+            # "Since last review": diff this run's checks against the most recent
+            # run on a *different* commit, so a returning reviewer sees what the
+            # latest push changed. None on a first open (or a same-sha recheck).
+            prev_run = await session.scalar(
+                select(PRCheck)
+                .where(PRCheck.repo_id == repo_row.id)
+                .where(PRCheck.pr_number == event.number)
+                .where(PRCheck.sha != ctx.pr.head.sha)
+                .order_by(PRCheck.created_at.desc())
+            )
+            changes = (
+                format_changes(prev_run.check_results, results, prev_run.sha, ctx.pr.head.sha)
+                if prev_run
+                else None
+            )
+            comment_body = build_comment(
+                results,
+                agent=agent_assessment,
+                agent_complete=agent_complete,
+                advisory_threshold=advisory_threshold,
+                changes=changes,
             )
 
             if existing_comment_id:
