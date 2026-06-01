@@ -122,12 +122,15 @@ def format_agent_assessment(assessment: DoneInput) -> str:
 
 def build_comment(
     results: list[CheckResult],
-    summary: str | None = None,
     agent: DoneInput | None = None,
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
 ) -> str:
+    # One summary, not two. The agent's summary sentence (first line of the Agent
+    # Review section) is the single canonical summary. The old `### Summary`
+    # section (fed by the never-wired summarizer module) is gone — a noise-cutting
+    # tool shouldn't show a maintainer two summaries and make them guess which.
     # `agent_complete` defaults True so a caller that hands over an assessment is
     # taken at face value; the live pipeline passes False for a force-finalized
     # run so the verdict shows ⚠️ Inconclusive instead of a false 🟢.
@@ -159,9 +162,6 @@ def build_comment(
         results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
     )
     parts = ["## PRwarden Review\n", verdict, "", table]
-
-    if summary:
-        parts.append(f"\n### Summary\n{summary}")
 
     if agent is not None:
         parts.append(f"\n### Agent Review\n{format_agent_assessment(agent)}")

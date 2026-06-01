@@ -78,11 +78,11 @@ def test_comment_mixed():
     assert "Generic single-word title" in comment
 
 
-def test_comment_includes_summary():
-    results = [CheckResult("title_quality", True, "")]
-    comment = build_comment(results, summary="This PR looks good overall.")
-    assert "This PR looks good overall." in comment
-    assert "### Summary" in comment
+def test_comment_has_no_separate_summary_section():
+    # The agent summary is the only summary; no second `### Summary` block.
+    comment = build_comment([CheckResult("title_quality", True, "")], agent=_assessment())
+    assert "### Summary" not in comment
+    assert "Guards the charge" in comment  # the agent's summary still shows
 
 
 def test_comment_footer():
