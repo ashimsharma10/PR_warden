@@ -172,6 +172,60 @@ def test_pick_label_all_fail():
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
 
 
+# ── Clickable locations ───────────────────────────────────────────────────────
+
+
+def _link_ctx(*paths: str):
+    from pr_warden.composer import LinkContext
+
+    return LinkContext(repo="o/r", sha="abc123", known_paths=frozenset(paths))
+
+
+def test_location_links_to_line_when_file_known():
+    ctx = _link_ctx("compile_to_pdf.py")
+    out = format_agent_assessment(
+        _assessment(attention=[_item("compile_to_pdf.py:55", "high", "high")]), ctx
+    )
+    assert "[`compile_to_pdf.py:55`](https://github.com/o/r/blob/abc123/compile_to_pdf.py#L55)" in out
+
+
+def test_location_handles_line_range():
+    ctx = _link_ctx("a/b.py")
+    out = format_agent_assessment(_assessment(attention=[_item("a/b.py:55-60", "high", "high")]), ctx)
+    assert "blob/abc123/a/b.py#L55-L60)" in out
+
+
+def test_location_stays_plain_when_file_unknown():
+    # No 404 links: a path not in the PR is left as a plain code span.
+    ctx = _link_ctx("other.py")
+    out = format_agent_assessment(_assessment(attention=[_item("ghost.py:9", "high", "high")]), ctx)
+    assert "`ghost.py:9`" in out
+    assert "](http" not in out
+
+
+def test_location_stays_plain_without_link_ctx():
+    out = format_agent_assessment(_assessment(attention=[_item("compile_to_pdf.py:55", "high", "high")]))
+    assert "`compile_to_pdf.py:55`" in out
+    assert "](http" not in out
+
+
+def test_location_freetext_citation_not_linked():
+    ctx = _link_ctx("compile_to_pdf.py")
+    out = format_agent_assessment(_assessment(attention=[_item("the retry loop", "high", "high")]), ctx)
+    assert "](http" not in out
+
+
+def test_verdict_headline_location_is_linked():
+    ctx = _link_ctx("auth.py")
+    comment = build_comment(
+        [CheckResult("title_quality", True, "")],
+        agent=_assessment(attention=[_item("auth.py:88", "high", "high")]),
+        link_ctx=ctx,
+    )
+    assert "Worth a look" in comment
+    assert "blob/abc123/auth.py#L88)" in comment
+
+
 # ── Facet labels (the only labels applied) ────────────────────────────────────
 
 

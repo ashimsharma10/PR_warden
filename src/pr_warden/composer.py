@@ -1,4 +1,7 @@
+import re
+from dataclasses import dataclass
 from enum import IntEnum
+from urllib.parse import quote
 
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
@@ -84,24 +87,75 @@ def _needs_attention(
     return _advisory_escalates(failed, advisory_threshold)
 
 
-def _format_attention(items: list[AttentionItem]) -> list[str]:
+@dataclass(frozen=True)
+class LinkContext:
+    """What the renderer needs to turn a cited `path:line` into a GitHub link:
+    the repo, the head commit the comment is about, and the set of real paths
+    (changed files ∪ repo tree) so we only ever link to files that exist.
+    """
+
+    repo: str                       # "owner/name"
+    sha: str                        # PR head commit the comment is rendered for
+    known_paths: frozenset[str]
+
+
+# A cited location like `path/to/file.py:55` or `file.py:55-60`. A bare path (no
+# line) is handled separately; free-text citations match nothing and stay plain.
+_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?$")
+
+
+def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
+    """Render a cited location as a Markdown link to the line on GitHub — but only
+    when it cleanly resolves to a real file in this PR. Anything else stays a plain
+    `code` span, so a broken or guessed link can never erode trust. Either way it
+    adds zero visible length: the maintainer just clicks instead of hunting.
+    """
+    code = f"`{location}`"
+    if link_ctx is None:
+        return code
+
+    loc = location.strip()
+    m = _LOCATION_RE.match(loc)
+    if m:
+        path, line, end = m.group("path"), m.group("line"), m.group("end")
+        anchor = f"#L{line}" + (f"-L{end}" if end else "")
+    elif loc in link_ctx.known_paths:        # a bare path, no line number
+        path, anchor = loc, ""
+    else:
+        return code
+
+    if path not in link_ctx.known_paths:     # don't link a file that isn't here
+        return code
+    url = (
+        f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/"
+        f"{quote(path, safe='/')}{anchor}"
+    )
+    return f"[{code}]({url})"
+
+
+def _format_attention(
+    items: list[AttentionItem], link_ctx: LinkContext | None = None
+) -> list[str]:
     """Render the attention map: the top 3 spots, ranked by risk × centrality.
 
     Numbered (not bulleted) because the order is the message — spot #1 is where a
     30-second maintainer should look first. Sorting is stable, so the agent's own
-    ordering breaks ties between items of equal priority.
+    ordering breaks ties between items of equal priority. Each location links
+    straight to the line on GitHub when it resolves to a real file.
     """
     ranked = sorted(items, key=lambda it: -it.priority)[:3]
     lines = ["\n**👀 Attention map** — ranked by risk × centrality:"]
     for i, it in enumerate(ranked, 1):
         lines.append(
-            f"{i}. `{it.location}` — {it.why} "
+            f"{i}. {_linkify_location(it.location, link_ctx)} — {it.why} "
             f"_(risk {it.risk} · centrality {it.centrality})_"
         )
     return lines
 
 
-def format_agent_assessment(assessment: DoneInput) -> str:
+def format_agent_assessment(
+    assessment: DoneInput, link_ctx: LinkContext | None = None
+) -> str:
     """Render the agent's structured assessment as a Markdown comment section."""
     lines = [assessment.summary.strip()]
 
@@ -110,7 +164,7 @@ def format_agent_assessment(assessment: DoneInput) -> str:
         lines.append(f"\n**⚠️ Intent vs. diff mismatch:** {reason}")
 
     if assessment.attention:
-        lines += _format_attention(assessment.attention)
+        lines += _format_attention(assessment.attention, link_ctx)
 
     if assessment.open_questions:
         lines.append("\n**Open questions:**")
@@ -127,6 +181,7 @@ def build_comment(
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
+    link_ctx: LinkContext | None = None,
 ) -> str:
     # `agent_complete` defaults True so a caller that hands over an assessment is
     # taken at face value; the live pipeline passes False for a force-finalized
@@ -156,7 +211,8 @@ def build_comment(
     )
 
     verdict = build_verdict(
-        results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
     parts = ["## PRwarden Review\n", verdict, "", table]
 
@@ -164,7 +220,7 @@ def build_comment(
         parts.append(f"\n### Summary\n{summary}")
 
     if agent is not None:
-        parts.append(f"\n### Agent Review\n{format_agent_assessment(agent)}")
+        parts.append(f"\n### Agent Review\n{format_agent_assessment(agent, link_ctx)}")
 
     parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
     return "\n".join(parts)
@@ -200,6 +256,7 @@ def _concern(
     *,
     agent_complete: bool,
     advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
 ) -> tuple[Concern, str]:
     """The single source of truth for both the verdict headline and the status
     label: read both layers, lead with the worst, return (level, headline).
@@ -250,7 +307,8 @@ def _concern(
     )
     if top is not None and top.priority >= _HIGH_ATTENTION_PRIORITY:
         return Concern.ATTENTION, line(
-            "🟠", "Worth a look", f"start at `{top.location}` — {top.why}", tail=mix
+            "🟠", "Worth a look",
+            f"start at {_linkify_location(top.location, link_ctx)} — {top.why}", tail=mix,
         )
     if _needs_attention(results, advisory_threshold):
         medplus = [r for r in failed if r.severity >= ATTENTION_THRESHOLD]
@@ -300,10 +358,12 @@ def build_verdict(
     *,
     agent_complete: bool,
     advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
 ) -> str:
     """The one-line judgment headline (see `_concern` for the full ladder)."""
     return _concern(
-        results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )[1]
 
 
