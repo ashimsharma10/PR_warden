@@ -217,8 +217,12 @@ async def update_comment(token: str, repo: str, comment_id: int, body: str) -> N
 
 
 _LABEL_COLORS = {
-    "prwarden:clean": "2ea44f",
-    "prwarden:needs-attention": "d73a4a",
+    # Facet labels (the only ones applied) — distinct hues so a flagged PR isn't
+    # a wall of red. The retired status labels are only ever removed, not added.
+    "prwarden:blocker": "b60205",          # dark red
+    "prwarden:security": "5319e7",         # purple
+    "prwarden:ai-authored": "1d76db",      # blue
+    "prwarden:intent-mismatch": "d93f0b",  # orange
 }
 
 

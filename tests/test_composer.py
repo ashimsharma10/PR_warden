@@ -1,10 +1,17 @@
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import CheckResult, Severity
 from pr_warden.composer import (
+    FACET_LABELS,
+    LABEL_AI_AUTHORED,
+    LABEL_BLOCKER,
     LABEL_CLEAN,
+    LABEL_INTENT_MISMATCH,
     LABEL_NEEDS_ATTENTION,
+    LABEL_SECURITY,
+    MANAGED_LABELS,
     build_comment,
     format_agent_assessment,
+    pick_facet_labels,
     pick_label,
 )
 
@@ -54,10 +61,10 @@ def test_comment_all_passed_no_reasons():
         CheckResult("pr_size", True, "4 files, 100 lines"),
     ]
     comment = build_comment(results)
-    # 3 passing rows each carry ✅, plus the "Clean" banner's ✅.
-    assert comment.count("✅") == 4
+    # No agent ran → the verdict is honest that this is checks-only.
+    assert "No automated flags" in comment
+    assert "checks only" in comment
     assert "❌" not in comment
-    assert "all checks passed" in comment
 
 
 def test_comment_mixed():
@@ -165,6 +172,155 @@ def test_pick_label_all_fail():
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
 
 
+# ── Facet labels (the only labels applied) ────────────────────────────────────
+
+
+def test_facets_none_on_clean_pr():
+    assert pick_facet_labels([CheckResult("title_quality", True, "")]) == []
+
+
+def test_facets_no_generic_status_label():
+    # The binary status labels are retired — never returned for application.
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    labels = pick_facet_labels(results, _assessment(intent_matches_diff=False))
+    assert LABEL_CLEAN not in labels
+    assert LABEL_NEEDS_ATTENTION not in labels
+
+
+def test_facets_high_failure_sets_blocker_and_security():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    labels = pick_facet_labels(results)
+    assert LABEL_BLOCKER in labels
+    assert LABEL_SECURITY in labels
+
+
+def test_facets_ai_branch_sets_provenance():
+    results = [CheckResult("ai_branch", False, "claude- branch", severity=Severity.LOW)]
+    assert pick_facet_labels(results) == [LABEL_AI_AUTHORED]
+
+
+def test_facets_intent_mismatch_only_from_finished_agent():
+    clean = [CheckResult("title_quality", True, "")]
+    assert LABEL_INTENT_MISMATCH not in pick_facet_labels(clean, None)
+    assert LABEL_INTENT_MISMATCH in pick_facet_labels(clean, _assessment(intent_matches_diff=False))
+    # A force-finalized run is not trusted to set the facet.
+    assert LABEL_INTENT_MISMATCH not in pick_facet_labels(
+        clean, _assessment(intent_matches_diff=False), agent_complete=False
+    )
+
+
+def test_managed_labels_strips_retired_status_labels():
+    # The applier must be able to remove the old binary labels left by older runs.
+    assert {LABEL_CLEAN, LABEL_NEEDS_ATTENTION} <= MANAGED_LABELS
+    assert FACET_LABELS <= MANAGED_LABELS
+
+
+# ── Verdict headline ──────────────────────────────────────────────────────────
+
+
+def _clean() -> list:
+    return [CheckResult("title_quality", True, ""), CheckResult("pr_size", True, "")]
+
+
+def test_verdict_intent_mismatch_headlines_over_clean_checks():
+    # The marquee fix: every check passes, but the agent caught claim ≠ diff.
+    comment = build_comment(
+        _clean(), agent=_assessment(intent_matches_diff=False, intent_mismatch_reason="adds logging, not a fix")
+    )
+    assert "High concern" in comment
+    assert "doesn't match the stated intent" in comment
+    assert "adds logging, not a fix" in comment
+
+
+def test_verdict_secret_beats_intent_mismatch():
+    # Two 🔴 signals → the deterministic check leads (it's the harder fact).
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    comment = build_comment(results, agent=_assessment(intent_matches_diff=False))
+    assert "High concern" in comment
+    assert "AWS key" in comment
+    assert "stated intent" not in comment
+
+
+def test_verdict_high_attention_elevates_clean_pr():
+    agent = _assessment(attention=[_item("core.py:9", "high", "high")])  # priority 9
+    comment = build_comment(_clean(), agent=agent)
+    assert "Worth a look" in comment
+    assert "core.py:9" in comment
+
+
+def test_verdict_incomplete_agent_is_inconclusive_not_clean():
+    comment = build_comment(_clean(), agent=_assessment(attention=[]), agent_complete=False)
+    assert "Inconclusive" in comment
+    assert "didn't finish" in comment
+    assert "low-risk" not in comment
+
+
+def test_verdict_incomplete_agent_does_not_soften_a_secret():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    comment = build_comment(results, agent=_assessment(), agent_complete=False)
+    assert "High concern" in comment      # hard fact stands
+    assert "Inconclusive" not in comment
+
+
+def test_verdict_low_confidence_is_inconclusive():
+    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.3))
+    assert "Inconclusive" in comment
+    assert "low-confidence" in comment
+
+
+def test_verdict_clean_with_confident_agent_is_low_risk():
+    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.85))
+    assert "Looks low-risk" in comment
+    assert "still your call" in comment
+
+
+def test_label_escalates_on_agent_intent_mismatch():
+    # Clean checks, but the agent says claim ≠ diff → status flips to needs-attention.
+    assert pick_label(_clean(), _assessment(intent_matches_diff=False)) == LABEL_NEEDS_ATTENTION
+
+
+def test_label_escalates_on_high_attention_spot():
+    agent = _assessment(attention=[_item("core.py:9", "high", "high")])  # priority 9
+    assert pick_label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+
+
+def test_label_incomplete_agent_does_not_escalate():
+    # An agent that didn't finish must not flip the primary status filter.
+    assert pick_label(_clean(), _assessment(attention=[]), agent_complete=False) == LABEL_CLEAN
+
+
+def test_label_low_confidence_does_not_escalate():
+    assert pick_label(_clean(), _assessment(attention=[], confidence=0.3)) == LABEL_CLEAN
+
+
+def test_label_no_agent_reduces_to_checks_only():
+    # Backward compatible: without an agent, the rule is exactly the old one.
+    assert pick_label(_clean()) == LABEL_CLEAN
+    assert pick_label([CheckResult("no_tests", False, "x", severity=Severity.MEDIUM)]) == LABEL_NEEDS_ATTENTION
+
+
+def test_label_and_verdict_never_disagree():
+    # The invariant the shared concern level guarantees: a "High concern" /
+    # "Worth a look" headline always coincides with a needs-attention label.
+    agent = _assessment(intent_matches_diff=False)
+    comment = build_comment(_clean(), agent=agent)
+    assert "High concern" in comment
+    assert pick_label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+
+
+def test_verdict_never_recommends_merge():
+    for agent, complete in [
+        (None, True),
+        (_assessment(attention=[]), True),
+        (_assessment(intent_matches_diff=False), True),
+        (_assessment(), False),
+    ]:
+        comment = build_comment(_clean(), agent=agent, agent_complete=complete).lower()
+        assert "merge" not in comment
+        assert "approve" not in comment
+        assert "lgtm" not in comment
+
+
 # ── Severity tiering ──────────────────────────────────────────────────────────
 
 
@@ -190,18 +346,19 @@ def test_pick_label_high_failure_needs_attention():
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
 
 
-def test_banner_advisory_only_says_clean():
+def test_verdict_advisory_only_is_minor_flags():
     results = [CheckResult("branch_naming", False, "nit", severity=Severity.LOW)]
     comment = build_comment(results)
-    assert "advisory only" in comment
-    assert "does not affect status" in comment
+    assert "Minor flags" in comment
+    assert "nothing blocking" in comment
 
 
-def test_banner_high_severity_flagged():
+def test_verdict_high_severity_is_high_concern():
     results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
     comment = build_comment(results)
-    assert "Needs attention" in comment
-    assert "1 high" in comment
+    assert "High concern" in comment
+    assert "AWS key" in comment      # leads with the failing check's own reason
+    assert "1 high" in comment       # severity tail
 
 
 def test_comment_has_severity_column_and_orders_high_first():
@@ -240,17 +397,18 @@ def test_advisory_escalation_can_be_disabled():
     assert pick_label(_lows(10), advisory_threshold=None) == LABEL_CLEAN
 
 
-def test_banner_explains_advisory_escalation():
+def test_verdict_explains_advisory_escalation():
     comment = build_comment(_lows(3))
-    assert "Needs attention" in comment
-    assert "advisories escalates" in comment
+    assert "Worth a look" in comment
+    assert "piled up" in comment
+    assert "escalates" in comment
 
 
-def test_banner_no_escalation_note_when_real_flag_present():
+def test_verdict_high_flag_beats_advisory_pileup():
     results = _lows(3) + [CheckResult("secret_leak", False, "key", severity=Severity.HIGH)]
     comment = build_comment(results)
-    assert "Needs attention" in comment
-    assert "advisories escalates" not in comment  # escalation note only when nits alone
+    assert "High concern" in comment
+    assert "piled up" not in comment  # the hard flag leads, not the nit pile-up
 
 
 def test_advisory_escalation_config_defaults():

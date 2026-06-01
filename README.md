@@ -7,9 +7,9 @@ A GitHub App that reviews pull requests automatically — cuts the noise so
 maintainers only look at PRs worth looking at.
 
 On every PR open / push / reopen (drafts skipped), it runs **18 deterministic
-checks**, optionally runs a **tool-using LLM review agent**, posts a single
-Markdown comment (edited in place on later events, never spammed), and labels
-the PR `prwarden:clean` or `prwarden:needs-attention`.
+checks**, optionally runs a **tool-using LLM review agent**, and posts a single
+Markdown comment (edited in place on later events, never spammed) — led by a
+one-line **verdict** and tagged with specific **facet labels** for queue triage.
 
 ## How it works
 
@@ -25,9 +25,38 @@ kicks off a background task that:
 5. Creates or edits one PR comment, swaps the label, and records the run in the
    database for `/stats` and cost accounting.
 
-The label is `prwarden:clean` only if **every** check passes. The agent is
-purely additive — if it's disabled, over budget, times out, or crashes, the
-deterministic checks still post.
+The agent is purely additive — if it's disabled, over budget, times out, or
+crashes, the deterministic checks still post.
+
+## The comment: verdict + facet labels
+
+The comment opens with a single **verdict headline** that reads both layers and
+leads with the most serious signal, so the bot's most valuable finding is the
+first thing a maintainer sees — even when every deterministic check passes:
+
+| Verdict | When |
+| --- | --- |
+| 🔴 **High concern** | a HIGH check failed, or the agent found the diff doesn't match the stated intent |
+| 🟠 **Worth a look** | a high-priority (risk × centrality) attention spot, or a MEDIUM+ check failed |
+| ⚠️ **Inconclusive** | the agent didn't finish, or is low-confidence (never softens a 🔴/🟠) |
+| 🟡 **Minor flags** | advisory-only nits, nothing blocking |
+| 🟢 **Looks low-risk / No automated flags** | agent ran and agrees, or checks-only |
+
+It's a triage read, never a ruling — it never tells the maintainer to merge.
+
+PRwarden **does not apply a generic `clean` / `needs-attention` status label.**
+The verdict carries the overall read; the PR list carries only **specific facet
+labels** a maintainer routes on (older status labels are stripped automatically):
+
+| Label | Applied when |
+| --- | --- |
+| `prwarden:blocker` | a HIGH-severity check failed (`secret_leak`, `critical_path`) |
+| `prwarden:security` | a security-kind check failed |
+| `prwarden:ai-authored` | `ai_branch` or `ai_commit_footer` tripped |
+| `prwarden:intent-mismatch` | the agent (when it finished) found diff ≠ stated intent |
+
+Facets are additive and independent — a PR off an AI-named branch with no real
+flags gets `ai-authored` and nothing else.
 
 ## The deterministic checks
 
