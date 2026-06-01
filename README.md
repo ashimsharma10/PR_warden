@@ -9,7 +9,8 @@ maintainers only look at PRs worth looking at.
 On every PR open / push / reopen (drafts skipped), it runs **18 deterministic
 checks**, optionally runs a **tool-using LLM review agent**, posts a single
 Markdown comment (edited in place on later events, never spammed), and labels
-the PR `prwarden:clean` or `prwarden:needs-attention`.
+the PR with one status label (`prwarden:clean` / `prwarden:needs-attention`)
+plus any applicable facet labels for triage.
 
 ## How it works
 
@@ -25,9 +26,26 @@ kicks off a background task that:
 5. Creates or edits one PR comment, swaps the label, and records the run in the
    database for `/stats` and cost accounting.
 
-The label is `prwarden:clean` only if **every** check passes. The agent is
+The status label is `prwarden:clean` only if **every** check passes. The agent is
 purely additive — if it's disabled, over budget, times out, or crashes, the
 deterministic checks still post.
+
+### Labels
+
+One **status** label (mutually exclusive) plus zero or more **facet** labels
+(additive, for filtering/routing) are applied on each run; the bot reconciles
+the full set every time, so labels that no longer apply are removed.
+
+| Label | Kind | Applied when |
+| --- | --- | --- |
+| `prwarden:clean` / `prwarden:needs-attention` | status | the overall check result (a MEDIUM+ failure or an advisory pile-up flips to needs-attention) |
+| `prwarden:blocker` | facet | a HIGH-severity check failed (`secret_leak`, `critical_path`) |
+| `prwarden:security` | facet | a security-kind check failed (`secret_leak`, `critical_path`) |
+| `prwarden:ai-authored` | facet | `ai_branch` or `ai_commit_footer` tripped |
+| `prwarden:intent-mismatch` | facet | the agent found the diff doesn't match the stated intent |
+
+Facets are independent of status — e.g. a PR off an AI-named branch with no real
+flags stays `clean` but still carries `ai-authored`.
 
 ## The deterministic checks
 

@@ -4,6 +4,33 @@ from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
 LABEL_CLEAN = "prwarden:clean"
 LABEL_NEEDS_ATTENTION = "prwarden:needs-attention"
 
+# Facet labels — additive, applied on top of the one status label above. Each is
+# a routing/filtering signal a maintainer can't get from clean/needs-attention
+# alone (a blocker vs. a pile of nits, a security touch, an AI-authored PR, a
+# claim≠diff slop signal).
+LABEL_BLOCKER = "prwarden:blocker"              # a HIGH-severity check failed
+LABEL_SECURITY = "prwarden:security"            # a security-kind check failed
+LABEL_AI_AUTHORED = "prwarden:ai-authored"      # AI branch / commit-footer signal
+LABEL_INTENT_MISMATCH = "prwarden:intent-mismatch"  # agent: diff ≠ stated intent
+
+# Every label the bot manages. The applier reconciles a PR against this set —
+# removing any managed label no longer applicable — so it MUST list all of them.
+MANAGED_LABELS = frozenset(
+    {
+        LABEL_CLEAN,
+        LABEL_NEEDS_ATTENTION,
+        LABEL_BLOCKER,
+        LABEL_SECURITY,
+        LABEL_AI_AUTHORED,
+        LABEL_INTENT_MISMATCH,
+    }
+)
+
+# Which failed checks drive the kind/provenance facets. Severity drives `blocker`
+# (read off CheckResult.severity), so it needs no name list.
+_SECURITY_CHECKS = {"secret_leak", "critical_path"}
+_AI_CHECKS = {"ai_branch", "ai_commit_footer"}
+
 # How each severity renders in the comment. Word + glyph so the signal survives
 # in clients that don't show emoji and so tests can assert on the word.
 _SEVERITY_BADGE: dict[Severity, str] = {
@@ -169,3 +196,31 @@ def pick_label(
         if _needs_attention(results, advisory_threshold)
         else LABEL_CLEAN
     )
+
+
+def pick_labels(
+    results: list[CheckResult],
+    agent: DoneInput | None = None,
+    *,
+    advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
+) -> list[str]:
+    """The full label set for a PR: the one status label plus any facets.
+
+    Element 0 is always the status label (clean/needs-attention) from
+    `pick_label`; facets are appended in a stable order. Facets are additive and
+    independent of status — e.g. a PR off an AI-named branch with no real flags
+    stays `clean` but still carries `ai-authored`.
+    """
+    labels = [pick_label(results, advisory_threshold=advisory_threshold)]
+    failed = {r.name for r in results if not r.passed}
+
+    if any(not r.passed and r.severity >= Severity.HIGH for r in results):
+        labels.append(LABEL_BLOCKER)
+    if failed & _SECURITY_CHECKS:
+        labels.append(LABEL_SECURITY)
+    if failed & _AI_CHECKS:
+        labels.append(LABEL_AI_AUTHORED)
+    if agent is not None and not agent.intent_matches_diff:
+        labels.append(LABEL_INTENT_MISMATCH)
+
+    return labels

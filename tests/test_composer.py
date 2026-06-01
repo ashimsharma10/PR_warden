@@ -1,11 +1,17 @@
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import CheckResult, Severity
 from pr_warden.composer import (
+    LABEL_AI_AUTHORED,
+    LABEL_BLOCKER,
     LABEL_CLEAN,
+    LABEL_INTENT_MISMATCH,
     LABEL_NEEDS_ATTENTION,
+    LABEL_SECURITY,
+    MANAGED_LABELS,
     build_comment,
     format_agent_assessment,
     pick_label,
+    pick_labels,
 )
 
 
@@ -163,6 +169,69 @@ def test_pick_label_any_fail():
 def test_pick_label_all_fail():
     results = [CheckResult("a", False, "x"), CheckResult("b", False, "y")]
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
+
+
+# ── Facet labels (pick_labels) ────────────────────────────────────────────────
+
+
+def test_pick_labels_clean_has_no_facets():
+    results = [CheckResult("title_quality", True, ""), CheckResult("pr_size", True, "")]
+    assert pick_labels(results) == [LABEL_CLEAN]
+
+
+def test_pick_labels_status_label_is_first():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    assert pick_labels(results)[0] == LABEL_NEEDS_ATTENTION
+
+
+def test_pick_labels_high_failure_sets_blocker_and_security():
+    results = [CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH)]
+    labels = pick_labels(results)
+    assert LABEL_NEEDS_ATTENTION in labels
+    assert LABEL_BLOCKER in labels      # severity facet
+    assert LABEL_SECURITY in labels     # kind facet
+
+
+def test_pick_labels_medium_failure_no_blocker():
+    # A MEDIUM failure needs attention but is not a blocker (blocker is HIGH-only).
+    results = [CheckResult("no_tests", False, "no tests", severity=Severity.MEDIUM)]
+    labels = pick_labels(results)
+    assert LABEL_NEEDS_ATTENTION in labels
+    assert LABEL_BLOCKER not in labels
+
+
+def test_pick_labels_ai_branch_stays_clean_but_flags_provenance():
+    # A lone AI-branch advisory doesn't escalate status, but the facet still applies.
+    results = [CheckResult("ai_branch", False, "claude- branch", severity=Severity.LOW)]
+    labels = pick_labels(results)
+    assert labels[0] == LABEL_CLEAN
+    assert LABEL_AI_AUTHORED in labels
+
+
+def test_pick_labels_intent_mismatch_only_from_agent():
+    results = [CheckResult("title_quality", True, "")]
+    # No agent → never set, even though status is clean.
+    assert LABEL_INTENT_MISMATCH not in pick_labels(results, None)
+    # Agent flags a mismatch → facet appears (status stays clean — facets are additive).
+    labels = pick_labels(results, _assessment(intent_matches_diff=False))
+    assert labels[0] == LABEL_CLEAN
+    assert LABEL_INTENT_MISMATCH in labels
+
+
+def test_pick_labels_matching_agent_no_facet():
+    results = [CheckResult("title_quality", True, "")]
+    assert LABEL_INTENT_MISMATCH not in pick_labels(results, _assessment(intent_matches_diff=True))
+
+
+def test_managed_labels_covers_all_six():
+    assert MANAGED_LABELS == {
+        LABEL_CLEAN,
+        LABEL_NEEDS_ATTENTION,
+        LABEL_BLOCKER,
+        LABEL_SECURITY,
+        LABEL_AI_AUTHORED,
+        LABEL_INTENT_MISMATCH,
+    }
 
 
 # ── Severity tiering ──────────────────────────────────────────────────────────

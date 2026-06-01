@@ -14,7 +14,7 @@ from pr_warden.agent.loop import run_agent
 from pr_warden.agent.schemas import AgentResult
 from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
-from pr_warden.composer import LABEL_CLEAN, LABEL_NEEDS_ATTENTION, build_comment, pick_label
+from pr_warden.composer import MANAGED_LABELS, build_comment, pick_label, pick_labels
 from pr_warden.config import settings
 from pr_warden.db import async_session_factory, engine, get_session
 from pr_warden.github import auth, client
@@ -196,13 +196,19 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         results = run_checks(ctx)
         esc = config.advisory_escalation
         advisory_threshold = esc.threshold if esc.enabled else None
-        label = pick_label(results, advisory_threshold=advisory_threshold)
-
         agent_result = await _maybe_run_agent(token, repo, event, ctx.files)
         agent_assessment = agent_result.assessment if agent_result else None
         comment_body = build_comment(
             results, agent=agent_assessment, advisory_threshold=advisory_threshold
         )
+
+        # Full label set (status + facets); the agent assessment feeds the
+        # intent-mismatch facet, so this runs after the agent. Element 0 is the
+        # status label, recorded as action_taken for /stats accounting.
+        desired = set(
+            pick_labels(results, agent_assessment, advisory_threshold=advisory_threshold)
+        )
+        status_label = pick_label(results, advisory_threshold=advisory_threshold)
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
@@ -222,9 +228,13 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             else:
                 comment_id = await client.create_comment(token, repo, event.number, comment_body)
 
-            for lbl in [LABEL_CLEAN, LABEL_NEEDS_ATTENTION]:
+            # Reconcile against the full managed set: drop any label we own that
+            # no longer applies (e.g. a push that removes a secret clears blocker
+            # /security), then add the current set. Both ops are idempotent.
+            for lbl in MANAGED_LABELS - desired:
                 await client.remove_label(token, repo, event.number, lbl)
-            await client.add_label(token, repo, event.number, label)
+            for lbl in desired:
+                await client.add_label(token, repo, event.number, lbl)
 
             session.add(
                 PRCheck(
@@ -239,13 +249,18 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                     agent_result=(
                         agent_result.model_dump(mode="json") if agent_result else None
                     ),
-                    action_taken=label,
+                    action_taken=status_label,
                     comment_id=comment_id,
                 )
             )
             await session.commit()
 
-        log.info("pr_event.done", label=label, comment_id=comment_id)
+        log.info(
+            "pr_event.done",
+            label=status_label,
+            labels=sorted(desired),
+            comment_id=comment_id,
+        )
 
     except Exception:
         log.exception("pr_event.failed")
