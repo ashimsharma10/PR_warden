@@ -21,11 +21,12 @@ import time
 from typing import Any, Awaitable, Callable
 
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from pr_warden.agent.context import PRContext
-from pr_warden.agent.schemas import AgentResult, DoneInput, ToolResult
-from pr_warden.agent.tools import DONE_TOOL, build_tools, tool_to_anthropic_schema
+from pr_warden.agent.schemas import AgentResult, ToolResult
+from pr_warden.agent.spec import AgentSpec
+from pr_warden.agent.tools import DONE_TOOL, DoneTool, tool_to_anthropic_schema
 from pr_warden.core.client import estimate_cost, get_client
 
 log = structlog.get_logger()
@@ -44,18 +45,6 @@ Send = Callable[..., Awaitable[Any]]
 
 def _is_tool_use(block: Any) -> bool:
     return getattr(block, "type", None) == "tool_use"
-
-
-def _fallback_assessment(reason: str) -> DoneInput:
-    return DoneInput(
-        summary="The agent stopped before completing its assessment.",
-        files_touched=[],
-        intent_matches_diff=True,
-        intent_mismatch_reason="",
-        attention=[],
-        open_questions=[f"Assessment incomplete: {reason}."],
-        confidence=0.0,
-    )
 
 
 def _default_send(api_key: str) -> Send:
@@ -98,34 +87,44 @@ async def _execute_tool(tool_map: dict, ctx: PRContext, block: Any) -> ToolResul
 async def run_agent(
     ctx: PRContext,
     *,
+    spec: AgentSpec | None = None,
     api_key: str,
-    model: str = MODEL,
+    model: str | None = None,
     send: Send | None = None,
     tools: list | None = None,
 ) -> AgentResult:
-    """Run the review agent and return its structured assessment.
+    """Run an agent to its structured assessment.
 
-    `send` and `tools` are injectable for testing; in production they default to
-    a real Anthropic client and the standard toolset.
+    The agent is supplied as a spec (prompt, output schema, toolset, fallback);
+    it defaults to the review agent. `send` and `tools` are injectable for
+    testing; in production they default to a real Anthropic client and the
+    spec's toolset. `model` overrides the spec's default model.
     """
-    from pr_warden.agent.prompts import SYSTEM_PROMPT, render_initial_user_message
+    if spec is None:
+        from pr_warden.agent.review import REVIEW_AGENT
+
+        spec = REVIEW_AGENT
+    model = model or spec.model
 
     started = time.monotonic()
-    tools = tools or build_tools()
+    # The loop owns `done`: build it from the spec's output schema so the args
+    # the model must supply can't drift from what we validate against below.
+    if tools is None:
+        tools = [*spec.build_tools(), DoneTool(spec.output_schema, spec.done_description)]
     tool_schemas = [tool_to_anthropic_schema(t) for t in tools]
     tool_map = {t.name: t for t in tools}
     if send is None:
         send = _default_send(api_key)
 
     messages: list[dict] = [
-        {"role": "user", "content": render_initial_user_message(ctx)}
+        {"role": "user", "content": spec.render_user_message(ctx)}
     ]
     trace: list[dict] = []
     tool_calls = 0
     in_tokens = 0
     out_tokens = 0
 
-    def result(assessment: DoneInput, stopped_for: str) -> AgentResult:
+    def result(assessment: BaseModel, stopped_for: str) -> AgentResult:
         return AgentResult(
             assessment=assessment,
             trace=trace,
@@ -139,21 +138,17 @@ async def run_agent(
 
     async def force_finalize(reason: str) -> AgentResult:
         nonlocal in_tokens, out_tokens
-        messages.append({
-            "role": "user",
-            "content": "You've reached your budget. Call `done` now with whatever "
-                       "you have — put anything unverified in open_questions.",
-        })
+        messages.append({"role": "user", "content": spec.finalize_hint})
         try:
-            resp = await send(model=model, system=SYSTEM_PROMPT, tools=tool_schemas, messages=messages)
+            resp = await send(model=model, system=spec.system_prompt, tools=tool_schemas, messages=messages)
             in_tokens += resp.usage.input_tokens
             out_tokens += resp.usage.output_tokens
             done = next((b for b in resp.content if _is_tool_use(b) and b.name == DONE_TOOL), None)
             if done is not None:
-                return result(DoneInput.model_validate(done.input), reason)
+                return result(spec.output_schema.model_validate(done.input), reason)
         except Exception:  # noqa: BLE001 — finalize must always return something
             log.exception("agent.force_finalize_failed", reason=reason)
-        return result(_fallback_assessment(reason), reason)
+        return result(spec.fallback(reason), reason)
 
     for iteration in range(MAX_ITERATIONS):
         if tool_calls >= MAX_TOOL_CALLS:
@@ -163,7 +158,7 @@ async def run_agent(
             log.warning("agent.token_budget_exceeded", tokens=in_tokens + out_tokens)
             return await force_finalize("token_budget")
 
-        resp = await send(model=model, system=SYSTEM_PROMPT, tools=tool_schemas, messages=messages)
+        resp = await send(model=model, system=spec.system_prompt, tools=tool_schemas, messages=messages)
         in_tokens += resp.usage.input_tokens
         out_tokens += resp.usage.output_tokens
         messages.append({"role": "assistant", "content": resp.content})
@@ -176,7 +171,7 @@ async def run_agent(
         done = next((b for b in tool_uses if b.name == DONE_TOOL), None)
         if done is not None:
             try:
-                assessment = DoneInput.model_validate(done.input)
+                assessment = spec.output_schema.model_validate(done.input)
             except ValidationError as e:
                 messages.append({
                     "role": "user",

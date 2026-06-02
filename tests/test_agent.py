@@ -103,14 +103,29 @@ def test_tool_to_anthropic_schema_shape():
     assert "properties" in schema["input_schema"]
 
 
-def test_build_tools_includes_done():
+def test_build_tools_is_the_investigation_set():
+    # `done` is added by the loop (built from the agent's output schema), so the
+    # spec's toolset is investigation tools only.
     names = {t.name for t in build_tools()}
-    assert "done" in names
+    assert "done" not in names
     assert {
         "get_file", "get_pr_diff", "get_issue", "find_references",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
         "git_blame",
-    } <= names
+    } == names
+
+
+async def test_loop_appends_done_tool_from_spec():
+    # The engine assembles `done` itself; it must reach the model.
+    seen: dict = {}
+
+    async def send(*, model, system, tools, messages):
+        seen["tool_names"] = {t["name"] for t in tools}
+        return _resp([_tool_use("done", _DONE_ARGS)])
+
+    res = await run_agent(_ctx(), api_key="k", send=send)
+    assert "done" in seen["tool_names"]
+    assert res.stopped_for == "done"
 
 
 # ── loop ────────────────────────────────────────────────────────────────────
