@@ -4,16 +4,19 @@ Instead of parsing prose to guess "is the agent finished," the agent signals
 completion by calling `done` with its structured assessment. The loop sees the
 tool name and stops; the assessment IS the tool-call arguments. This tool has
 no `run` — the loop intercepts `done` before tool execution.
+
+`done` carries no schema of its own: the loop builds it from the running
+agent's output schema, so the args the model must supply can never drift from
+what the loop validates against.
 """
 
 from __future__ import annotations
 
-from pr_warden.agent.schemas import DoneInput, ToolResult
+from pr_warden.agent.schemas import ToolInput, ToolResult
 
-
-class DoneTool:
-    name = "done"
-    description = """Signal that you have enough information to produce your final
+# The review agent's `done` guidance. Pulled out as a named constant so an
+# agent spec can hand the loop its own description without subclassing.
+REVIEW_DONE_DESCRIPTION = """Signal that you have enough information to produce your final
 assessment. Call this with your structured output. After this is called, no more
 tools will be invoked.
 
@@ -28,9 +31,16 @@ Before calling this, make sure:
 
 When in doubt, prefer "I could not verify X — please check" in `open_questions`
 over a confident guess. Admitting uncertainty is correct; guessing is not."""
-    input_schema = DoneInput
 
-    async def run(self, ctx, input: DoneInput) -> ToolResult:  # pragma: no cover
+
+class DoneTool:
+    name = "done"
+
+    def __init__(self, input_schema: type[ToolInput], description: str):
+        self.input_schema = input_schema
+        self.description = description
+
+    async def run(self, ctx, input: ToolInput) -> ToolResult:  # pragma: no cover
         # The loop intercepts `done` and never calls this; present only so the
         # tool satisfies the Tool protocol.
         return ToolResult(ok=True, content="done")

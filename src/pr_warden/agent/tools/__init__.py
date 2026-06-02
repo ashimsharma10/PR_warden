@@ -13,8 +13,8 @@ DONE_TOOL = "done"
 
 
 def build_tools() -> list[Tool]:
-    """The toolset offered to the agent. `done` must be present — it's how the
-    loop terminates."""
+    """The investigation tools offered to the review agent. The loop appends
+    `done` (built from the agent's output schema), so it's not listed here."""
     return [
         GetFileTool(),
         GetPRDiffTool(),
@@ -24,8 +24,7 @@ def build_tools() -> list[Tool]:
         GetAuthorHistoryTool(),
         CheckSecurityPatternsTool(),
         GitBlameTool(),
-        DoneTool(),
     ]
 
 
-__all__ = ["Tool", "tool_to_anthropic_schema", "build_tools", "DONE_TOOL"]
+__all__ = ["Tool", "tool_to_anthropic_schema", "build_tools", "DONE_TOOL", "DoneTool"]

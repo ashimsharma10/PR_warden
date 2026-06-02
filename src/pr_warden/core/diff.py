@@ -6,7 +6,7 @@ The character cap keeps token cost bounded on huge PRs.
 
 from __future__ import annotations
 
-# ~30k chars of diff is roughly 8k tokens — plenty for a summary, cheap on Haiku.
+# ~30k chars of diff is roughly 8k tokens — plenty of context, keeps cost bounded.
 MAX_DIFF_CHARS = 30_000
 
 

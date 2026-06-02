@@ -7,9 +7,13 @@ or cache status — they clutter its reasoning without helping it.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# The agent's output schema. Generic so the loop (the engine) can carry any
+# agent's structured assessment, not just the review agent's DoneInput.
+OutputT = TypeVar("OutputT", bound=BaseModel)
 
 # Risk and centrality each map to a weight; an item's rank is their product, so a
 # high-risk change in load-bearing code (3×3=9) outranks a high-risk leaf (3×1=3).
@@ -108,10 +112,10 @@ class DoneInput(ToolInput):
     )
 
 
-class AgentResult(BaseModel):
+class AgentResult(BaseModel, Generic[OutputT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    assessment: DoneInput
+    assessment: OutputT
     trace: list[dict[str, Any]] = Field(default_factory=list)
     cost_usd: float = 0.0
     # done | tool_call_budget | token_budget | max_iterations | no_tool_call

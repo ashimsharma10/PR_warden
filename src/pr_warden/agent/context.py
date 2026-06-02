@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pr_warden.github.schemas import PullRequest
-from pr_warden.summarizer.diff import build_diff_text
+from pr_warden.core.diff import build_diff_text
 
 
 @dataclass
