@@ -98,6 +98,16 @@ def render_diff_section(files: list[dict]) -> str:
 def render_initial_user_message(ctx: PRContext) -> str:
     pr = ctx.pr
     body = (pr.body or "").strip() or "(no description)"
+    # The deterministic checks already ran; the model gets them as context so its
+    # review speaks for them (the comment shows no separate check table). It should
+    # fold material failures into the summary / where-to-focus, not just echo them.
+    checks_section = (
+        f"## Deterministic checks (already run)\n{ctx.check_findings}\n\n"
+        "Treat these as context: weave the material failures into your `summary` and "
+        "attention points where they matter; don't just restate the list.\n\n"
+        if ctx.check_findings
+        else ""
+    )
     return (
         f"Review PR #{ctx.pr_number} in {ctx.repo}.\n\n"
         f"## PR Title\n{pr.title}\n\n"
@@ -106,6 +116,7 @@ def render_initial_user_message(ctx: PRContext) -> str:
         f"## Changed files ({len(ctx.files)})\n{_file_list(ctx.files)}\n\n"
         f"## Diff summary\nTotal: +{pr.additions} -{pr.deletions} "
         f"across {len(ctx.files)} files.\n\n"
+        f"{checks_section}"
         f"## Diff\n{render_diff_section(ctx.files)}\n\n"
         "---\nInvestigate with tools to replace assumptions with facts, then call "
         "`done`. Cite evidence for every finding; put anything you couldn't verify "

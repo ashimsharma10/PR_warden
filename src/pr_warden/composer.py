@@ -1,4 +1,7 @@
+import re
+from dataclasses import dataclass
 from enum import IntEnum
+from urllib.parse import quote
 
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
@@ -45,13 +48,6 @@ class Concern(IntEnum):
     ATTENTION = 2  # 🟠 worth a look
     HIGH = 3       # 🔴 high concern
 
-# How each severity renders in the comment. Word + glyph so the signal survives
-# in clients that don't show emoji and so tests can assert on the word.
-_SEVERITY_BADGE: dict[Severity, str] = {
-    Severity.HIGH: "🔴 High",
-    Severity.MEDIUM: "🟠 Medium",
-    Severity.LOW: "🟡 Advisory",
-}
 
 # Fallback when no per-repo config is threaded through (e.g. direct calls/tests).
 # Mirrors AdvisoryEscalationConfig.threshold so behaviour is the same either way.
@@ -84,25 +80,59 @@ def _needs_attention(
     return _advisory_escalates(failed, advisory_threshold)
 
 
-def _format_attention(items: list[AttentionItem]) -> list[str]:
-    """Render the attention map: the top 3 spots, ranked by risk × centrality.
-
-    Numbered (not bulleted) because the order is the message — spot #1 is where a
-    30-second maintainer should look first. Sorting is stable, so the agent's own
-    ordering breaks ties between items of equal priority.
+@dataclass(frozen=True)
+class LinkContext:
+    """What the renderer needs to turn a cited `path:line` into a GitHub link:
+    the repo, the head commit, and the set of real paths so we only ever link to
+    files that exist.
     """
+
+    repo: str
+    sha: str
+    known_paths: frozenset[str]
+
+
+_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?$")
+
+
+def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
+    """A cited location → a Markdown link to the line on GitHub, but only when it
+    resolves to a real file in the PR. Anything else stays plain `code` so a
+    guessed/broken link never reaches a maintainer. Adds zero visible length."""
+    code = f"`{location}`"
+    if link_ctx is None:
+        return code
+    loc = location.strip()
+    m = _LOCATION_RE.match(loc)
+    if m:
+        path, line, end = m.group("path"), m.group("line"), m.group("end")
+        anchor = f"#L{line}" + (f"-L{end}" if end else "")
+    elif loc in link_ctx.known_paths:
+        path, anchor = loc, ""
+    else:
+        return code
+    if path not in link_ctx.known_paths:
+        return code
+    url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
+    return f"[{code}]({url})"
+
+
+def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) -> list[str]:
+    """The top 3 spots to look, ranked by risk × centrality. Numbered because the
+    order is the message — #1 is where a 30-second maintainer looks first. The
+    rank drives the order but isn't printed (terse); each location links to the
+    line when it resolves to a real file."""
     ranked = sorted(items, key=lambda it: -it.priority)[:3]
-    lines = ["\n**👀 Attention map** — ranked by risk × centrality:"]
+    lines = ["\n**Where to focus:**"]
     for i, it in enumerate(ranked, 1):
-        lines.append(
-            f"{i}. `{it.location}` — {it.why} "
-            f"_(risk {it.risk} · centrality {it.centrality})_"
-        )
+        lines.append(f"{i}. {_linkify_location(it.location, link_ctx)} — {it.why}")
     return lines
 
 
-def format_agent_assessment(assessment: DoneInput) -> str:
-    """Render the agent's structured assessment as a Markdown comment section."""
+def format_agent_assessment(assessment: DoneInput, link_ctx: LinkContext | None = None) -> str:
+    """Render the agent's structured read as the review body (no section heading —
+    it flows straight under the verdict). Summary, then where-to-focus, then up to
+    two open questions, then confidence."""
     lines = [assessment.summary.strip()]
 
     if not assessment.intent_matches_diff:
@@ -110,61 +140,85 @@ def format_agent_assessment(assessment: DoneInput) -> str:
         lines.append(f"\n**⚠️ Intent vs. diff mismatch:** {reason}")
 
     if assessment.attention:
-        lines += _format_attention(assessment.attention)
+        lines += _format_attention(assessment.attention, link_ctx)
 
     if assessment.open_questions:
         lines.append("\n**Open questions:**")
-        lines += [f"- {q}" for q in assessment.open_questions]
+        lines += [f"- {q}" for q in assessment.open_questions[:2]]
 
     lines.append(f"\n*Confidence: {assessment.confidence:.0%}*")
     return "\n".join(lines)
 
 
+def format_changes(
+    prev_results: dict[str, dict],
+    curr_results: list[CheckResult],
+    prev_sha: str,
+    curr_sha: str,
+) -> str | None:
+    """One-line "what changed since the last reviewed commit" for a returning
+    reviewer. None when no check flipped, so a no-op push adds nothing.
+    Deterministic checks only; the agent's read is not diffed (it would flap)."""
+    prev_failed = {name for name, r in prev_results.items() if not r.get("passed", True)}
+    curr_failed = {r.name for r in curr_results if not r.passed}
+    newly_failing = sorted(curr_failed - prev_failed)
+    newly_resolved = sorted(prev_failed - curr_failed)
+    if not newly_failing and not newly_resolved:
+        return None
+
+    def _names(ns: list[str]) -> str:
+        return ", ".join(n.replace("_", " ").title() for n in ns)
+
+    bits = []
+    if newly_failing:
+        bits.append(f"❌ now failing: {_names(newly_failing)}")
+    if newly_resolved:
+        bits.append(f"✅ now resolved: {_names(newly_resolved)}")
+    return f"**Since last review** (`{prev_sha[:7]}` → `{curr_sha[:7]}`): " + " · ".join(bits)
+
+
+def _format_failing_checks(results: list[CheckResult]) -> str | None:
+    """Deterministic fallback body when no LLM review ran: the failing checks as a
+    short list, highest severity first. Returns None if nothing failed."""
+    failed = sorted((r for r in results if not r.passed), key=lambda r: -int(r.severity))
+    if not failed:
+        return None
+    lines = ["\n**Checks needing attention:**"]
+    lines += [f"- {r.name.replace('_', ' ').title()} — {r.reason}" for r in failed]
+    return "\n".join(lines)
+
+
 def build_comment(
     results: list[CheckResult],
-    summary: str | None = None,
     agent: DoneInput | None = None,
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
+    changes: str | None = None,
+    link_ctx: LinkContext | None = None,
 ) -> str:
-    # `agent_complete` defaults True so a caller that hands over an assessment is
-    # taken at face value; the live pipeline passes False for a force-finalized
-    # run so the verdict shows ⚠️ Inconclusive instead of a false 🟢.
-    # Failures first, highest severity first; passing checks keep their order
-    # after. A maintainer should see a leaked secret before a branch-name nit.
-    ordered = sorted(
-        results,
-        key=lambda r: (r.passed, -int(r.severity)),
-    )
+    """One consolidated review — no section headings, no check table.
 
-    rows = []
-    for r in ordered:
-        icon = "✅" if r.passed else "❌"
-        # Severity is only meaningful for a failure; a passing check is just "—".
-        sev = _SEVERITY_BADGE[r.severity] if not r.passed else "—"
-        detail = r.reason if not r.passed else "—"
-        name = r.name.replace("_", " ").title()
-        rows.append(f"| {name} | {icon} | {sev} | {detail} |")
-
-    table = "\n".join(
-        [
-            "| Check | Status | Severity | Detail |",
-            "|-------|--------|----------|--------|",
-            *rows,
-        ]
-    )
-
+    A deterministic verdict line leads (it owns the headline and is reproducible;
+    a leaked secret surfaces here regardless of what the LLM says). When the agent
+    ran, its structured read *is* the body — the deterministic checks were given
+    to it as context, so it speaks for them. When the agent didn't run, a
+    deterministic fallback lists the failing checks so the comment still informs.
+    """
     verdict = build_verdict(
-        results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
-    parts = ["## PRwarden Review\n", verdict, "", table]
-
-    if summary:
-        parts.append(f"\n### Summary\n{summary}")
+    parts = [verdict]
+    if changes:
+        parts.append(f"\n{changes}")
 
     if agent is not None:
-        parts.append(f"\n### Agent Review\n{format_agent_assessment(agent)}")
+        parts.append(f"\n{format_agent_assessment(agent, link_ctx)}")
+    else:
+        fallback = _format_failing_checks(results)
+        if fallback:
+            parts.append(fallback)
 
     parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
     return "\n".join(parts)
@@ -200,6 +254,7 @@ def _concern(
     *,
     agent_complete: bool,
     advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
 ) -> tuple[Concern, str]:
     """The single source of truth for both the verdict headline and the status
     label: read both layers, lead with the worst, return (level, headline).
@@ -250,7 +305,8 @@ def _concern(
     )
     if top is not None and top.priority >= _HIGH_ATTENTION_PRIORITY:
         return Concern.ATTENTION, line(
-            "🟠", "Worth a look", f"start at `{top.location}` — {top.why}", tail=mix
+            "🟠", "Worth a look",
+            f"start at {_linkify_location(top.location, link_ctx)} — {top.why}", tail=mix,
         )
     if _needs_attention(results, advisory_threshold):
         medplus = [r for r in failed if r.severity >= ATTENTION_THRESHOLD]
@@ -300,10 +356,12 @@ def build_verdict(
     *,
     agent_complete: bool,
     advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
 ) -> str:
     """The one-line judgment headline (see `_concern` for the full ladder)."""
     return _concern(
-        results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )[1]
 
 

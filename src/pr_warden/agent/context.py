@@ -19,6 +19,7 @@ class PRContext:
     repo: str                      # "owner/name" full name (what github.client expects)
     pr: PullRequest
     files: list[dict] = field(default_factory=list)  # GET /pulls/{n}/files
+    check_findings: str = ""       # deterministic check results, as context for the model
 
     @property
     def owner(self) -> str:

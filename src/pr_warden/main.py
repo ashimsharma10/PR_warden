@@ -16,7 +16,9 @@ from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
 from pr_warden.composer import (
     MANAGED_LABELS,
+    LinkContext,
     build_comment,
+    format_changes,
     pick_facet_labels,
     pick_label,
 )
@@ -137,8 +139,19 @@ async def _today_agent_cost() -> float:
     return float(total or 0.0)
 
 
+def _format_check_findings(results: list) -> str:
+    """The deterministic check results as a compact block for the agent's context:
+    failures first (with reason), then a one-line tally of what passed."""
+    failed = [r for r in results if not r.passed]
+    passed = [r for r in results if r.passed]
+    lines = [f"- FAIL {r.name}: {r.reason}" for r in failed]
+    if passed:
+        lines.append(f"- ({len(passed)} other checks passed)")
+    return "\n".join(lines) if lines else "(no checks reported)"
+
+
 async def _maybe_run_agent(
-    token: str, repo: str, event: PullRequestEvent, files: list[dict]
+    token: str, repo: str, event: PullRequestEvent, files: list[dict], check_findings: str = ""
 ) -> AgentResult | None:
     """Run the review agent if it's allowlisted, configured, and under budget.
 
@@ -157,7 +170,10 @@ async def _maybe_run_agent(
         log.warning("agent.skipped", reason="daily_budget", spent_usd=round(spent, 4))
         return None
 
-    pr_ctx = PRContext(token=token, repo=repo, pr=event.pull_request, files=files)
+    pr_ctx = PRContext(
+        token=token, repo=repo, pr=event.pull_request, files=files,
+        check_findings=check_findings,
+    )
     try:
         result = await asyncio.wait_for(
             run_agent(
@@ -201,7 +217,12 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         results = run_checks(ctx)
         esc = config.advisory_escalation
         advisory_threshold = esc.threshold if esc.enabled else None
-        agent_result = await _maybe_run_agent(token, repo, event, ctx.files)
+
+        # The deterministic checks are context for the agent — its consolidated
+        # review speaks for them (no separate check table in the comment).
+        agent_result = await _maybe_run_agent(
+            token, repo, event, ctx.files, check_findings=_format_check_findings(results)
+        )
         agent_assessment = agent_result.assessment if agent_result else None
         # A force-finalized run (budget/timeout/no-tool) returns a fallback
         # assessment; flag it so the verdict reads ⚠️ Inconclusive, not a false 🟢,
@@ -216,11 +237,12 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             agent_complete=agent_complete,
             advisory_threshold=advisory_threshold,
         )
-        comment_body = build_comment(
-            results,
-            agent=agent_assessment,
-            agent_complete=agent_complete,
-            advisory_threshold=advisory_threshold,
+        # Cited `path:line`s link straight to the line, but only for files that
+        # exist here (changed files ∪ repo tree) — never a broken link.
+        link_ctx = LinkContext(
+            repo=repo,
+            sha=ctx.pr.head.sha,
+            known_paths=frozenset({f["filename"] for f in ctx.files} | set(ctx.repo_tree)),
         )
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
@@ -233,6 +255,29 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                 .where(PRCheck.pr_number == event.number)
                 .where(PRCheck.comment_id.isnot(None))
                 .order_by(PRCheck.created_at.desc())
+            )
+
+            # "Since last review": diff this run's checks against the most recent
+            # run on a different commit, so a returning reviewer sees what changed.
+            prev_run = await session.scalar(
+                select(PRCheck)
+                .where(PRCheck.repo_id == repo_row.id)
+                .where(PRCheck.pr_number == event.number)
+                .where(PRCheck.sha != ctx.pr.head.sha)
+                .order_by(PRCheck.created_at.desc())
+            )
+            changes = (
+                format_changes(prev_run.check_results, results, prev_run.sha, ctx.pr.head.sha)
+                if prev_run
+                else None
+            )
+            comment_body = build_comment(
+                results,
+                agent=agent_assessment,
+                agent_complete=agent_complete,
+                advisory_threshold=advisory_threshold,
+                changes=changes,
+                link_ctx=link_ctx,
             )
 
             if existing_comment_id:
