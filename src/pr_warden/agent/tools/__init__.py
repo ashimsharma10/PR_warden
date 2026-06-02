@@ -1,6 +1,7 @@
+from pr_warden.agent.schemas import DoneInput
 from pr_warden.agent.tools.base import Tool, tool_to_anthropic_schema
 from pr_warden.agent.tools.check_security_patterns import CheckSecurityPatternsTool
-from pr_warden.agent.tools.done import DoneTool
+from pr_warden.agent.tools.done import REVIEW_DONE_DESCRIPTION, DoneTool
 from pr_warden.agent.tools.find_references import FindReferencesTool
 from pr_warden.agent.tools.get_author_history import GetAuthorHistoryTool
 from pr_warden.agent.tools.get_file import GetFileTool
@@ -24,8 +25,8 @@ def build_tools() -> list[Tool]:
         GetAuthorHistoryTool(),
         CheckSecurityPatternsTool(),
         GitBlameTool(),
-        DoneTool(),
+        DoneTool(DoneInput, REVIEW_DONE_DESCRIPTION),
     ]
 
 
-__all__ = ["Tool", "tool_to_anthropic_schema", "build_tools", "DONE_TOOL"]
+__all__ = ["Tool", "tool_to_anthropic_schema", "build_tools", "DONE_TOOL", "DoneTool"]
