@@ -37,52 +37,38 @@ def _assessment(**kwargs) -> DoneInput:
     return DoneInput(**defaults)
 
 
-def test_comment_contains_header():
-    results = [CheckResult("title_quality", True, "")]
-    assert "## PRwarden Review" in build_comment(results)
+def test_comment_leads_with_verdict_no_headings_no_table():
+    # Consolidated: no "## PRwarden Review" / "### Agent Review" headings, no table.
+    comment = build_comment([CheckResult("title_quality", True, "")])
+    assert "## PRwarden Review" not in comment
+    assert "### Agent Review" not in comment
+    assert "| Check |" not in comment
+    assert comment.lstrip().startswith(("🟢", "🟡", "🟠", "🔴", "⚠️"))
 
 
-def test_comment_shows_pass_icon():
-    results = [CheckResult("title_quality", True, "")]
-    assert "✅" in build_comment(results)
-
-
-def test_comment_shows_fail_icon_and_reason():
+def test_comment_no_agent_lists_failing_checks_as_fallback():
     results = [CheckResult("title_quality", False, "Title is a single word")]
     comment = build_comment(results)
-    assert "❌" in comment
+    assert "Checks needing attention" in comment
     assert "Title is a single word" in comment
+    assert "| Check |" not in comment  # prose, not a table
 
 
-def test_comment_all_passed_no_reasons():
-    results = [
-        CheckResult("title_quality", True, ""),
-        CheckResult("description", True, ""),
-        CheckResult("pr_size", True, "4 files, 100 lines"),
-    ]
+def test_comment_all_passed_no_table_or_fallback():
+    results = [CheckResult("title_quality", True, ""), CheckResult("pr_size", True, "ok")]
     comment = build_comment(results)
-    # No agent ran → the verdict is honest that this is checks-only.
     assert "No automated flags" in comment
     assert "checks only" in comment
-    assert "❌" not in comment
+    assert "Checks needing attention" not in comment  # nothing failed
 
 
-def test_comment_mixed():
+def test_comment_fallback_orders_high_severity_first():
     results = [
-        CheckResult("title_quality", False, "Generic single-word title"),
-        CheckResult("description", True, ""),
+        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
     ]
-    comment = build_comment(results)
-    assert "✅" in comment
-    assert "❌" in comment
-    assert "Generic single-word title" in comment
-
-
-def test_comment_includes_summary():
-    results = [CheckResult("title_quality", True, "")]
-    comment = build_comment(results, summary="This PR looks good overall.")
-    assert "This PR looks good overall." in comment
-    assert "### Summary" in comment
+    comment = build_comment(results)  # no agent → fallback list
+    assert comment.index("Secret Leak") < comment.index("Branch Naming")
 
 
 def test_comment_footer():
@@ -90,14 +76,41 @@ def test_comment_footer():
     assert "/prwarden recheck" in comment
 
 
-def test_comment_includes_agent_section():
-    results = [CheckResult("title_quality", True, "")]
-    comment = build_comment(results, agent=_assessment())
-    assert "### Agent Review" in comment
-    assert "Guards the charge" in comment
-    assert "Attention map" in comment
+def _link_ctx(*paths):
+    from pr_warden.composer import LinkContext
+    return LinkContext(repo="o/r", sha="abc123", known_paths=frozenset(paths))
+
+
+def test_location_links_when_file_known_else_plain():
+    known = build_comment(
+        [CheckResult("t", True, "")],
+        agent=_assessment(attention=[_item("compile_to_pdf.py:55", "high", "high")]),
+        link_ctx=_link_ctx("compile_to_pdf.py"),
+    )
+    assert "blob/abc123/compile_to_pdf.py#L55)" in known
+    unknown = build_comment(
+        [CheckResult("t", True, "")],
+        agent=_assessment(attention=[_item("ghost.py:9", "high", "high")]),
+        link_ctx=_link_ctx("compile_to_pdf.py"),
+    )
+    assert "](http" not in unknown  # no broken link for a file not in the PR
+
+
+def test_changes_line_renders_above_body():
+    from pr_warden.composer import format_changes
+    prev = {"no_tests": {"passed": True, "reason": ""}}
+    out = format_changes(prev, [CheckResult("no_tests", False, "now failing")], "abc1234", "def5678")
+    assert out is not None and "now failing: No Tests" in out and "`abc1234` → `def5678`" in out
+    assert format_changes({"x": {"passed": False}}, [CheckResult("x", False, "")], "a", "b") is None
+
+
+def test_comment_agent_body_has_no_heading():
+    # The agent's read flows straight under the verdict — one consolidated review.
+    comment = build_comment([CheckResult("title_quality", True, "")], agent=_assessment())
+    assert "### Agent Review" not in comment
+    assert "Guards the charge" in comment           # agent summary
+    assert "Where to focus" in comment
     assert "payments.py:42" in comment
-    assert "double-charge would be silent" in comment
     assert "Confidence: 80%" in comment
 
 
@@ -172,13 +185,7 @@ def test_pick_label_all_fail():
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
 
 
-# ── Clickable locations ───────────────────────────────────────────────────────
-
-
-def _link_ctx(*paths: str):
-    from pr_warden.composer import LinkContext
-
-    return LinkContext(repo="o/r", sha="abc123", known_paths=frozenset(paths))
+# ── Clickable locations (granular) ────────────────────────────────────────────
 
 
 def test_location_links_to_line_when_file_known():
@@ -413,17 +420,6 @@ def test_verdict_high_severity_is_high_concern():
     assert "High concern" in comment
     assert "AWS key" in comment      # leads with the failing check's own reason
     assert "1 high" in comment       # severity tail
-
-
-def test_comment_has_severity_column_and_orders_high_first():
-    results = [
-        CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
-        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
-    ]
-    comment = build_comment(results)
-    assert "Severity" in comment
-    # High-severity failure must appear before the low-severity one.
-    assert comment.index("Secret Leak") < comment.index("Branch Naming")
 
 
 def _lows(n: int) -> list:
