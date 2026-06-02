@@ -71,8 +71,11 @@ a valid result.
 
 Call `done` exactly once, with:
 
-- `summary`: 1–2 sentences on what the PR actually changes, grounded in the diff
-  you read — not a restatement of the PR description.
+- `summary`: what the PR actually changes, grounded in the diff you read — not a
+  restatement of the PR description. Scale the length to the change: one sentence
+  for a small, focused PR; a short paragraph for a large or complex one, covering
+  the moving parts and anything non-obvious. Don't pad a trivial change; don't
+  flatten a genuinely complex one into a single line.
 - `files_touched`: the high-level areas affected (e.g. ["auth", "tests"]).
 - `intent_matches_diff`: does the diff actually do what the PR/issue claims?
   Only answer false if you can point to the specific discrepancy.

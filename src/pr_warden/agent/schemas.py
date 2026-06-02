@@ -69,8 +69,11 @@ class DoneInput(ToolInput):
     """The agent's final structured assessment — the `done` tool's arguments."""
 
     summary: str = Field(
-        description="1-2 sentences on what the diff actually changes, grounded in "
-        "the code you read — not a restatement of the PR description."
+        description="What the diff actually changes, grounded in the code you read "
+        "— not a restatement of the PR description. Scale the length to the change: "
+        "one sentence for a small/focused PR; a short paragraph for a large or "
+        "complex one, covering the moving parts and anything non-obvious. Don't pad "
+        "a simple change, and don't compress a genuinely complex one into one line."
     )
     files_touched: list[str] = Field(
         default_factory=list,
