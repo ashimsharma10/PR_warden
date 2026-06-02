@@ -18,7 +18,6 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
 
-    summarizer_max_cost_usd: float = 0.10
     daily_cost_limit_usd: float = 5.00
 
     # ── Semgrep ruleset (check_security_patterns) ───────────────────────────

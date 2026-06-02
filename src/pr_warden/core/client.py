@@ -1,8 +1,8 @@
-"""Thin Anthropic wrapper shared by every summarizer agent.
+"""Thin Anthropic plumbing shared across pr_warden.
 
-This is deliberately small and model-agnostic. When the summarizer is split
-into multiple specialised agents (intent, completeness, blast-radius, ...),
-each one reuses `call_model` and only varies its system prompt / schema.
+Deliberately small and model-agnostic: a per-API-key client cache plus a
+prefix-matched cost estimator. The review agent uses these today; anything
+else that needs to talk to Anthropic can reuse them.
 """
 
 from __future__ import annotations
