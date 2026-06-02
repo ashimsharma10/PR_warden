@@ -157,7 +157,7 @@ Tests: `pytest -q`.
 | --- | --- | --- |
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` / `GITHUB_WEBHOOK_SECRET` | GitHub App auth | — |
 | `DATABASE_URL` | Postgres (async) DSN | local dev DSN |
-| `ANTHROPIC_API_KEY` | Enables the agent / summarizer | unset |
+| `ANTHROPIC_API_KEY` | Enables the review agent | unset |
 | `AGENT_REVIEW_REPOS` | Comma-separated `owner/name` allowlist for the agent | empty (agent off) |
 | `AGENT_MODEL` / `AGENT_TIMEOUT_S` | Agent model and wall-clock cap | `claude-sonnet-4-6` / 90s |
 | `DAILY_COST_LIMIT_USD` | Daily agent spend ceiling | 5.00 |
