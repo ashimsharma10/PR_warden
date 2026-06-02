@@ -9,7 +9,7 @@ should never need a tool to learn "what's in the diff," only "what calls this."
 from __future__ import annotations
 
 from pr_warden.agent.context import PRContext
-from pr_warden.summarizer.prompts import load_prompt
+from pr_warden.core.prompts import load_prompt
 
 SYSTEM_PROMPT = load_prompt("agent_system_v1.md")
 

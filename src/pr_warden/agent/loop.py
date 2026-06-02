@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from pr_warden.agent.context import PRContext
 from pr_warden.agent.schemas import AgentResult, DoneInput, ToolResult
 from pr_warden.agent.tools import DONE_TOOL, build_tools, tool_to_anthropic_schema
-from pr_warden.summarizer.client import estimate_cost, get_client
+from pr_warden.core.client import estimate_cost, get_client
 
 log = structlog.get_logger()
 
