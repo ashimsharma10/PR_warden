@@ -185,13 +185,7 @@ def test_pick_label_all_fail():
     assert pick_label(results) == LABEL_NEEDS_ATTENTION
 
 
-# ── Clickable locations ───────────────────────────────────────────────────────
-
-
-def _link_ctx(*paths: str):
-    from pr_warden.composer import LinkContext
-
-    return LinkContext(repo="o/r", sha="abc123", known_paths=frozenset(paths))
+# ── Clickable locations (granular) ────────────────────────────────────────────
 
 
 def test_location_links_to_line_when_file_known():
