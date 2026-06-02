@@ -48,6 +48,8 @@ def _is_tool_use(block: Any) -> bool:
 
 def _fallback_assessment(reason: str) -> DoneInput:
     return DoneInput(
+        verdict_level="inconclusive",
+        verdict="the agent stopped before completing its assessment",
         summary="The agent stopped before completing its assessment.",
         files_touched=[],
         intent_matches_diff=True,
