@@ -107,5 +107,7 @@ def render_initial_user_message(ctx: PRContext) -> str:
         f"## Diff summary\nTotal: +{pr.additions} -{pr.deletions} "
         f"across {len(ctx.files)} files.\n\n"
         f"## Diff\n{render_diff_section(ctx.files)}\n\n"
-        "---\nInvestigate as needed, then call `done` with your assessment."
+        "---\nInvestigate with tools to replace assumptions with facts, then call "
+        "`done`. Cite evidence for every finding; put anything you couldn't verify "
+        "in open_questions rather than guessing."
     )

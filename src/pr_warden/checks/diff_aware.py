@@ -2,7 +2,7 @@ import fnmatch
 import re
 from pathlib import PurePosixPath
 
-from pr_warden.checks.registry import CheckContext, CheckResult, register
+from pr_warden.checks.registry import CheckContext, CheckResult, Severity, register
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ def _matches_any_glob(path: str, patterns: list[str]) -> bool:
 # ── Check #5: trivial metadata-only diff ──────────────────────────────────────
 
 
-@register
+@register(Severity.LOW)
 def check_trivial_metadata_diff(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.trivial_metadata_diff
     if not cfg.enabled:
@@ -81,7 +81,7 @@ def check_trivial_metadata_diff(ctx: CheckContext) -> CheckResult | None:
 # ── Check #9: no tests for code change ────────────────────────────────────────
 
 
-@register
+@register(Severity.MEDIUM)
 def check_no_tests(ctx: CheckContext) -> CheckResult | None:
     cfg = ctx.config.checks.no_tests
     if not cfg.enabled:
@@ -105,7 +105,7 @@ def check_no_tests(ctx: CheckContext) -> CheckResult | None:
 # ── Check #10: test assertions weakened ───────────────────────────────────────
 
 
-@register
+@register(Severity.MEDIUM)
 def check_test_assertions_weakened(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.test_assertions_weakened.enabled:
         return None
@@ -128,7 +128,7 @@ def check_test_assertions_weakened(ctx: CheckContext) -> CheckResult | None:
 # ── Check #12: empty function bodies ──────────────────────────────────────────
 
 
-@register
+@register(Severity.MEDIUM)
 def check_empty_function_bodies(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.empty_function_bodies.enabled:
         return None
@@ -152,7 +152,7 @@ def check_empty_function_bodies(ctx: CheckContext) -> CheckResult | None:
 # ── Check #13: dependency-only churn ──────────────────────────────────────────
 
 
-@register
+@register(Severity.LOW)
 def check_dependency_only_churn(ctx: CheckContext) -> CheckResult | None:
     if not ctx.config.checks.dependency_only_churn.enabled:
         return None

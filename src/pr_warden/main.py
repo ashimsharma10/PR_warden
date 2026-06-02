@@ -14,7 +14,13 @@ from pr_warden.agent.loop import run_agent
 from pr_warden.agent.schemas import AgentResult
 from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
-from pr_warden.composer import LABEL_CLEAN, LABEL_NEEDS_ATTENTION, build_comment, pick_label
+from pr_warden.composer import (
+    MANAGED_LABELS,
+    LinkContext,
+    build_comment,
+    pick_facet_labels,
+    pick_label,
+)
 from pr_warden.config import settings
 from pr_warden.db import async_session_factory, engine, get_session
 from pr_warden.github import auth, client
@@ -194,11 +200,40 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         config = await _load_repo_config(token, repo)
         ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
-        label = pick_label(results)
-
+        esc = config.advisory_escalation
+        advisory_threshold = esc.threshold if esc.enabled else None
         agent_result = await _maybe_run_agent(token, repo, event, ctx.files)
         agent_assessment = agent_result.assessment if agent_result else None
-        comment_body = build_comment(results, agent=agent_assessment)
+        # A force-finalized run (budget/timeout/no-tool) returns a fallback
+        # assessment; flag it so the verdict reads ⚠️ Inconclusive, not a false 🟢,
+        # and so an incomplete run never escalates the status label.
+        agent_complete = agent_result is not None and agent_result.stopped_for == "done"
+
+        # Label and headline both derive from the same concern level, so the agent
+        # escalates status (e.g. an intent mismatch → needs-attention) consistently.
+        label = pick_label(
+            results,
+            agent_assessment,
+            agent_complete=agent_complete,
+            advisory_threshold=advisory_threshold,
+        )
+        # Cited `path:line` locations link straight to the line on GitHub, but
+        # only for files that actually exist here (changed files ∪ repo tree) so
+        # we never post a broken link.
+        link_ctx = LinkContext(
+            repo=repo,
+            sha=ctx.pr.head.sha,
+            known_paths=frozenset(
+                {f["filename"] for f in ctx.files} | set(ctx.repo_tree)
+            ),
+        )
+        comment_body = build_comment(
+            results,
+            agent=agent_assessment,
+            agent_complete=agent_complete,
+            advisory_threshold=advisory_threshold,
+            link_ctx=link_ctx,
+        )
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
             repo_row = await _get_or_create_repo(session, event.installation.id, repo)
@@ -218,9 +253,18 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             else:
                 comment_id = await client.create_comment(token, repo, event.number, comment_body)
 
-            for lbl in [LABEL_CLEAN, LABEL_NEEDS_ATTENTION]:
+            # Apply facet labels only — the overall read lives in the verdict
+            # headline, not a generic status label. Reconcile against the full
+            # managed set so stale facets and any retired status label from an
+            # earlier version get stripped. `label` (the would-be status) is kept
+            # for /stats analytics, not applied. Both ops are idempotent.
+            desired_labels = set(
+                pick_facet_labels(results, agent_assessment, agent_complete=agent_complete)
+            )
+            for lbl in MANAGED_LABELS - desired_labels:
                 await client.remove_label(token, repo, event.number, lbl)
-            await client.add_label(token, repo, event.number, label)
+            for lbl in desired_labels:
+                await client.add_label(token, repo, event.number, lbl)
 
             session.add(
                 PRCheck(
