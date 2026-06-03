@@ -239,11 +239,16 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             advisory_threshold=advisory_threshold,
         )
         # Cited `path:line`s link straight to the line, but only for files that
-        # exist here (changed files ∪ repo tree) — never a broken link.
+        # exist here (changed files ∪ repo tree) — never a broken link. A changed
+        # file links into the PR diff (the change itself); an unchanged file links
+        # to the blob at head.
+        changed_paths = frozenset(f["filename"] for f in ctx.files)
         link_ctx = LinkContext(
             repo=repo,
             sha=ctx.pr.head.sha,
-            known_paths=frozenset({f["filename"] for f in ctx.files} | set(ctx.repo_tree)),
+            known_paths=changed_paths | frozenset(ctx.repo_tree),
+            changed_paths=changed_paths,
+            pr_number=event.number,
         )
 
         async with _pr_comment_lock(repo, event.number), async_session_factory() as session:
