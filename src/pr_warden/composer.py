@@ -152,9 +152,10 @@ def _location_url(link_ctx: LinkContext, path: str, line: str | None, end: str |
 
 
 def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
-    """A cited location → a Markdown link to the line on GitHub, but only when the
-    path resolves to a real file in the PR. Anything else stays plain `code` so a
-    guessed/broken link never reaches a maintainer."""
+    """A cited location → a Markdown link on GitHub, but only when the path
+    resolves to a real file in the PR. A changed file links into the PR diff (the
+    change itself); an unchanged-but-existing file links to the blob. Anything
+    else stays plain `code` so a guessed/broken link never reaches a maintainer."""
     loc = location.strip()
     if link_ctx is None:
         return f"`{loc}`"
@@ -163,14 +164,13 @@ def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
     if m and m.group("path") in link_ctx.known_paths:
         path, line, end = m.group("path"), m.group("line"), m.group("end")
         span = f"{path}:{line}" + (f"-{end}" if end else "")
-        anchor = f"#L{line}" + (f"-L{end}" if end else "")
-        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
+        url = _location_url(link_ctx, path, line, end)
         link = f"[`{span}`]({url})"
         rest = m.group("rest").strip()
         return f"{link} {rest}" if rest else link
 
     if loc in link_ctx.known_paths:  # a bare path, no line
-        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(loc, safe='/')}"
+        url = _location_url(link_ctx, loc, None, None)
         return f"[`{loc}`]({url})"
     return f"`{loc}`"
 
@@ -479,7 +479,7 @@ def render_verdict(
     )
 
 
-def pick_label(
+def verdict_level(
     results: list[CheckResult],
     agent: DoneInput | None = None,
     *,
@@ -524,9 +524,9 @@ def pick_facet_labels(
     high_check = any(not r.passed and r.severity >= Severity.HIGH for r in results)
     if high_check or (agent_ok and agent.verdict_level == "high"):
         labels.append(LABEL_BLOCKER)
-    if summary.failed_names & _SECURITY_CHECKS:
+    if failed & _SECURITY_CHECKS:
         labels.append(LABEL_SECURITY)
-    if summary.failed_names & _AI_CHECKS:
+    if failed & _AI_CHECKS:
         labels.append(LABEL_AI_AUTHORED)
     if agent_ok and not agent.intent_matches_diff:
         labels.append(LABEL_INTENT_MISMATCH)

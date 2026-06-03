@@ -111,7 +111,7 @@ def test_build_tools_is_the_investigation_set():
     names = {t.name for t in build_tools()}
     assert "done" not in names
     assert {
-        "get_file", "get_pr_diff", "get_issue", "find_references",
+        "get_file", "get_pr_diff", "get_issue", "find_references", "search_code",
         "get_repo_conventions", "get_author_history", "check_security_patterns",
         "git_blame",
     } == names
