@@ -27,7 +27,7 @@ from pr_warden.db import async_session_factory, engine, get_session
 from pr_warden.github import auth, client
 from pr_warden.github.schemas import PullRequestEvent
 from pr_warden.github.webhooks import verify_signature
-from pr_warden.models import PRCheck, Repo
+from pr_warden.models import PRCheck, Repo, WebhookEvent
 from pr_warden.repo_config import CONFIG_PATH, DEFAULT_CONFIG, RepoConfig, parse_config
 
 log = structlog.get_logger()
@@ -56,6 +56,9 @@ def _pr_comment_lock(repo: str, pr_number: int) -> asyncio.Lock:
 async def lifespan(app: FastAPI):
     pr_warden_log.configure_logging()
     log.info("pr_warden.startup", app_id=settings.github_app_id)
+    # Re-dispatch any work a previous process accepted (200'd) but didn't finish
+    # before it died — the durability half of "additive, never fatal".
+    await _recover_pending_events()
     yield
     await client.close()
     await engine.dispose()
@@ -70,6 +73,7 @@ async def webhook(
     background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(default=None),
     x_github_event: str | None = Header(default=None),
+    x_github_delivery: str | None = Header(default=None),
 ):
     body = await request.body()
 
@@ -77,15 +81,89 @@ async def webhook(
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     trace_id = pr_warden_log.new_trace_id()
-    structlog.contextvars.bind_contextvars(trace_id=trace_id, event_type=x_github_event)
+    structlog.contextvars.bind_contextvars(
+        trace_id=trace_id, event_type=x_github_event, delivery=x_github_delivery
+    )
 
     if x_github_event == "pull_request":
         data = json.loads(body)
         event = PullRequestEvent.model_validate(data)
         if event.action in _REVIEWABLE_ACTIONS and not event.pull_request.draft:
-            background_tasks.add_task(_handle_pr_event, event, trace_id)
+            # Persist the work durably *before* we 200 GitHub, then process it.
+            # If we die after this commit, startup recovery re-dispatches it.
+            event_id = await _record_event(
+                x_github_delivery, "pull_request", event.action, data, trace_id
+            )
+            background_tasks.add_task(_process_event, event_id)
 
     return {"ok": True}
+
+
+async def _record_event(
+    delivery_id: str | None, event_type: str, action: str, payload: dict, trace_id: str
+) -> int:
+    """Persist an incoming actionable event as a `pending` WebhookEvent and return
+    its id. Committed synchronously so the work outlives this process."""
+    async with async_session_factory() as session:
+        row = WebhookEvent(
+            delivery_id=delivery_id or trace_id,  # delivery header is always set by GitHub
+            event_type=event_type,
+            action=action,
+            payload=payload,
+            trace_id=trace_id,
+            status="pending",
+        )
+        session.add(row)
+        await session.commit()
+        return row.id
+
+
+async def _process_event(event_id: int) -> None:
+    """Run one queued event to completion, recording its terminal status.
+
+    Claims the row (`processing`, attempts += 1), dispatches to the matching
+    handler, then marks it `done` (or `failed` with the error). Re-running a row
+    is safe — the per-PR comment lock and idempotent GitHub ops absorb it."""
+    async with async_session_factory() as session:
+        row = await session.get(WebhookEvent, event_id)
+        if row is None or row.status == "done":
+            return
+        row.status = "processing"
+        row.attempts += 1
+        await session.commit()
+        event_type, payload, trace_id = row.event_type, row.payload, row.trace_id
+
+    status, error = "done", None
+    try:
+        if event_type == "pull_request":
+            await _handle_pr_event(PullRequestEvent.model_validate(payload), trace_id)
+        else:
+            log.warning("event.unknown_type", event_type=event_type)
+    except Exception as e:  # noqa: BLE001 — terminal status must always be recorded
+        log.exception("event.process_failed", event_id=event_id)
+        status, error = "failed", f"{type(e).__name__}: {e}"
+
+    async with async_session_factory() as session:
+        row = await session.get(WebhookEvent, event_id)
+        if row is not None:
+            row.status, row.error = status, error
+            await session.commit()
+
+
+async def _recover_pending_events() -> None:
+    """On startup, re-dispatch events accepted but not finished before a crash."""
+    async with async_session_factory() as session:
+        ids = (
+            await session.scalars(
+                select(WebhookEvent.id)
+                .where(WebhookEvent.status.in_(("pending", "processing")))
+                .order_by(WebhookEvent.created_at)
+            )
+        ).all()
+    if ids:
+        log.info("events.recovering", count=len(ids))
+        for eid in ids:
+            asyncio.create_task(_process_event(eid))
 
 
 async def _load_repo_config(token: str, repo: str) -> RepoConfig:
