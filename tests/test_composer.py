@@ -29,6 +29,8 @@ def _label(*args, **kwargs) -> str:
 
 def _assessment(**kwargs) -> DoneInput:
     defaults = dict(
+        verdict_level="attention",
+        verdict="Guards the charge, but the retry path has no test.",
         summary="Guards the charge behind an already_charged check.",
         files_touched=["payments.py"],
         intent_matches_diff=True,
@@ -57,12 +59,12 @@ def test_comment_leads_with_verdict_no_headings_no_table():
     assert comment.lstrip().startswith(("🟢", "🟡", "🟠", "🔴", "⚠️"))
 
 
-def test_comment_no_agent_lists_failing_checks_as_fallback():
+def test_comment_no_agent_shows_failing_checks_table():
     results = [CheckResult("title_quality", False, "Title is a single word")]
     comment = build_comment(results)
-    assert "Checks needing attention" in comment
+    assert "Failing checks" in comment
+    assert "| Check | Severity | Detail |" in comment
     assert "Title is a single word" in comment
-    assert "| Check |" not in comment  # prose, not a table
 
 
 def test_comment_all_passed_no_table_or_fallback():
@@ -122,7 +124,7 @@ def test_comment_agent_body_has_no_heading():
     assert "Guards the charge" in comment           # agent summary
     assert "Where to focus" in comment
     assert "payments.py:42" in comment
-    assert "Confidence: 80%" in comment
+    # Confidence line was dropped for brevity — just verify content flows.
 
 
 def test_comment_no_agent_section_when_absent():
@@ -130,17 +132,17 @@ def test_comment_no_agent_section_when_absent():
     assert "### Agent Review" not in comment
 
 
-def test_format_agent_assessment_flags_intent_mismatch():
+def test_agent_body_omits_intent_mismatch_block():
+    # The mismatch is carried by the verdict headline, not repeated as a body block.
     out = format_agent_assessment(
         _assessment(intent_matches_diff=False, intent_mismatch_reason="Adds telemetry, not a fix")
     )
-    assert "Intent vs. diff mismatch" in out
-    assert "Adds telemetry, not a fix" in out
+    assert "Intent vs. diff mismatch" not in out
 
 
-def test_format_agent_assessment_renders_open_questions():
+def test_format_agent_assessment_renders_questions():
     out = format_agent_assessment(_assessment(open_questions=["Is the lock released on error?"]))
-    assert "Open questions" in out
+    assert "Questions" in out
     assert "Is the lock released on error?" in out
 
 
@@ -197,6 +199,22 @@ def test_verdict_level_all_fail():
 
 
 # ── Clickable locations (granular) ────────────────────────────────────────────
+
+
+def test_location_links_even_with_trailing_text():
+    # The agent sometimes appends prose to the anchor; we still link the path:line.
+    ctx = _link_ctx("scrape_jobs.py")
+    out = format_agent_assessment(
+        _assessment(attention=[_item("scrape_jobs.py:236 (auth header added)", "high", "high")]), ctx
+    )
+    assert "blob/abc123/scrape_jobs.py#L236)" in out
+    assert "(auth header added)" in out  # trailing prose kept
+
+
+def test_agent_high_verdict_applies_blocker_label():
+    # A serious agent verdict is labelled seriously, not merely intent-mismatch.
+    labels = pick_facet_labels([CheckResult("t", True, "")], _assessment(verdict_level="high"))
+    assert LABEL_BLOCKER in labels
 
 
 def test_location_links_to_line_when_file_known():
@@ -294,14 +312,19 @@ def _clean() -> list:
     return [CheckResult("title_quality", True, ""), CheckResult("pr_size", True, "")]
 
 
-def test_verdict_intent_mismatch_headlines_over_clean_checks():
-    # The marquee fix: every check passes, but the agent caught claim ≠ diff.
+def test_verdict_is_authored_by_the_agent():
+    # The model owns the headline: its verdict_level → glyph/title, its words.
     comment = build_comment(
-        _clean(), agent=_assessment(intent_matches_diff=False, intent_mismatch_reason="adds logging, not a fix")
+        _clean(),
+        agent=_assessment(
+            verdict_level="high",
+            verdict="the diff doesn't match the stated intent — only logging was added",
+            intent_matches_diff=False,
+            intent_mismatch_reason="adds logging, not a fix",
+        ),
     )
-    assert "High concern" in comment
-    assert "doesn't match the stated intent" in comment
-    assert "adds logging, not a fix" in comment
+    assert "🔴 **High concern**" in comment
+    assert "only logging was added" in comment
 
 
 def test_verdict_secret_beats_intent_mismatch():
@@ -324,7 +347,7 @@ def test_verdict_incomplete_agent_is_inconclusive_not_clean():
     comment = build_comment(_clean(), agent=_assessment(attention=[]), agent_complete=False)
     assert "Inconclusive" in comment
     assert "didn't finish" in comment
-    assert "low-risk" not in comment
+    assert "Clean" not in comment
 
 
 def test_verdict_incomplete_agent_does_not_soften_a_secret():
@@ -334,16 +357,22 @@ def test_verdict_incomplete_agent_does_not_soften_a_secret():
     assert "Inconclusive" not in comment
 
 
-def test_verdict_low_confidence_is_inconclusive():
-    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.3))
-    assert "Inconclusive" in comment
-    assert "low-confidence" in comment
+def test_verdict_agent_can_set_inconclusive():
+    comment = build_comment(
+        _clean(),
+        agent=_assessment(verdict_level="inconclusive", verdict="couldn't verify the migration path"),
+    )
+    assert "⚠️ **Inconclusive**" in comment
+    assert "couldn't verify the migration path" in comment
 
 
-def test_verdict_clean_with_confident_agent_is_low_risk():
-    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.85))
-    assert "Looks low-risk" in comment
-    assert "still your call" in comment
+def test_verdict_agent_low_is_just_clean():
+    comment = build_comment(
+        _clean(),
+        agent=_assessment(verdict_level="low", verdict="ignored for low"),
+    )
+    assert "✅ **Clean**" in comment
+    assert "ignored for low" not in comment  # low → no verbose headline text
 
 
 def test_label_escalates_on_agent_intent_mismatch():
@@ -371,13 +400,14 @@ def test_label_no_agent_reduces_to_checks_only():
     assert _label([CheckResult("no_tests", False, "x", severity=Severity.MEDIUM)]) == LABEL_NEEDS_ATTENTION
 
 
-def test_label_and_verdict_never_disagree():
-    # The invariant the shared concern level guarantees: a "High concern" /
-    # "Worth a look" headline always coincides with a needs-attention label.
-    agent = _assessment(intent_matches_diff=False)
-    comment = build_comment(_clean(), agent=agent)
-    assert "High concern" in comment
-    assert _label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+def test_verdict_high_check_floors_the_agent_verdict():
+    # Safety floor: even if the model says low-risk, a leaked secret forces 🔴 —
+    # the deterministic line, not the model's words.
+    results = [CheckResult("secret_leak", False, "AWS key in config.py", severity=Severity.HIGH)]
+    comment = build_comment(results, agent=_assessment(verdict_level="low", verdict="looks fine"))
+    assert "🔴 **High concern**" in comment
+    assert "Secret Leak" in comment
+    assert "looks fine" not in comment  # the model could not downgrade the secret
 
 
 def test_verdict_never_recommends_merge():

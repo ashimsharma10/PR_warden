@@ -114,29 +114,34 @@ class LinkContext:
     known_paths: frozenset[str]
 
 
-_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?$")
+# Match a LEADING `path:line` (or range) anchor; any trailing prose is kept as-is.
+# Being lenient about trailing text means a location like
+# "auth.py:21 (the fallback token)" still links the `auth.py:21` part.
+_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?(?P<rest>.*)$")
 
 
 def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
-    """A cited location → a Markdown link to the line on GitHub, but only when it
-    resolves to a real file in the PR. Anything else stays plain `code` so a
-    guessed/broken link never reaches a maintainer. Adds zero visible length."""
-    code = f"`{location}`"
-    if link_ctx is None:
-        return code
+    """A cited location → a Markdown link to the line on GitHub, but only when the
+    path resolves to a real file in the PR. Anything else stays plain `code` so a
+    guessed/broken link never reaches a maintainer."""
     loc = location.strip()
+    if link_ctx is None:
+        return f"`{loc}`"
+
     m = _LOCATION_RE.match(loc)
-    if m:
+    if m and m.group("path") in link_ctx.known_paths:
         path, line, end = m.group("path"), m.group("line"), m.group("end")
+        span = f"{path}:{line}" + (f"-{end}" if end else "")
         anchor = f"#L{line}" + (f"-L{end}" if end else "")
-    elif loc in link_ctx.known_paths:
-        path, anchor = loc, ""
-    else:
-        return code
-    if path not in link_ctx.known_paths:
-        return code
-    url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
-    return f"[{code}]({url})"
+        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
+        link = f"[`{span}`]({url})"
+        rest = m.group("rest").strip()
+        return f"{link} {rest}" if rest else link
+
+    if loc in link_ctx.known_paths:  # a bare path, no line
+        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(loc, safe='/')}"
+        return f"[`{loc}`]({url})"
+    return f"`{loc}`"
 
 
 def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) -> list[str]:
@@ -152,24 +157,28 @@ def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) 
 
 
 def format_agent_assessment(assessment: DoneInput, link_ctx: LinkContext | None = None) -> str:
-    """Render the agent's structured read as the review body (no section heading —
-    it flows straight under the verdict). Summary, then where-to-focus, then up to
-    two open questions, then confidence."""
+    """Render the agent's read — kept deliberately short. When the PR is low-risk
+    and there's nothing to surface, the summary alone suffices (or nothing, when
+    the verdict already says Clean). Otherwise: summary → focus → questions."""
     lines = [assessment.summary.strip()]
-
-    if not assessment.intent_matches_diff:
-        reason = assessment.intent_mismatch_reason or "no reason given"
-        lines.append(f"\n**⚠️ Intent vs. diff mismatch:** {reason}")
 
     if assessment.attention:
         lines += _format_attention(assessment.attention, link_ctx)
 
     if assessment.open_questions:
-        lines.append("\n**Open questions:**")
+        lines.append("\n**Questions:**")
         lines += [f"- {q}" for q in assessment.open_questions[:2]]
 
-    lines.append(f"\n*Confidence: {assessment.confidence:.0%}*")
     return "\n".join(lines)
+
+
+# Severity badge for the failing-checks table. Word + glyph so the signal
+# survives in clients without emoji and tests can assert on the word.
+_SEV_BADGE: dict[Severity, str] = {
+    Severity.HIGH: "🔴 High",
+    Severity.MEDIUM: "🟠 Medium",
+    Severity.LOW: "🟡 Advisory",
+}
 
 
 def format_changes(
@@ -200,14 +209,18 @@ def format_changes(
 
 
 def _format_failing_checks(results: list[CheckResult]) -> str | None:
-    """Deterministic fallback body when no LLM review ran: the failing checks as a
-    short list, highest severity first. Returns None if nothing failed."""
+    """The failed deterministic checks as a compact table — only failures, highest
+    severity first; passing checks are never shown. Returns None if nothing failed."""
     failed = sorted((r for r in results if not r.passed), key=lambda r: -int(r.severity))
     if not failed:
         return None
-    lines = ["\n**Checks needing attention:**"]
-    lines += [f"- {r.name.replace('_', ' ').title()} — {r.reason}" for r in failed]
-    return "\n".join(lines)
+    rows = [
+        f"| {r.name.replace('_', ' ').title()} | {_SEV_BADGE[r.severity]} | {r.reason} |"
+        for r in failed
+    ]
+    return "\n".join(
+        ["\n**Failing checks**", "", "| Check | Severity | Detail |", "|---|---|---|", *rows]
+    )
 
 
 def build_comment(
@@ -219,15 +232,14 @@ def build_comment(
     changes: str | None = None,
     link_ctx: LinkContext | None = None,
 ) -> str:
-    """One consolidated review — no section headings, no check table.
+    """One consolidated, deliberately short review.
 
-    A deterministic verdict line leads (it owns the headline and is reproducible;
-    a leaked secret surfaces here regardless of what the LLM says). When the agent
-    ran, its structured read *is* the body — the deterministic checks were given
-    to it as context, so it speaks for them. When the agent didn't run, a
-    deterministic fallback lists the failing checks so the comment still informs.
+    Verdict headline → the agent's brief read (when it ran) → a compact table of
+    only the *failing* deterministic checks. The model authors the verdict; a
+    HIGH-severity check still floors it to 🔴 so a leaked secret can't be buried.
+    With no agent, the headline + the failing-checks table still inform.
     """
-    verdict = build_verdict(
+    verdict = render_verdict(
         results, agent, agent_complete=agent_complete,
         advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
@@ -237,10 +249,12 @@ def build_comment(
 
     if agent is not None:
         parts.append(f"\n{format_agent_assessment(agent, link_ctx)}")
-    else:
-        fallback = _format_failing_checks(results)
-        if fallback:
-            parts.append(fallback)
+
+    # The failing-checks table shows in both cases — it's the deterministic record
+    # of what tripped (only failures; passing checks are never listed).
+    failing = _format_failing_checks(results)
+    if failing:
+        parts.append(failing)
 
     parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
     return "\n".join(parts)
@@ -385,7 +399,56 @@ def build_verdict(
     )[1]
 
 
-def verdict_level(
+# verdict_level → (glyph, title). The model picks the level; the app maps it to a
+# consistent glyph and title word, and the model's `verdict` text follows.
+_VERDICT_STYLE: dict[str, tuple[str, str]] = {
+    "high": ("🔴", "High concern"),
+    "attention": ("🟠", "Worth a look"),
+    "minor": ("🟡", "Minor note"),
+    "low": ("✅", "Clean"),
+    "inconclusive": ("⚠️", "Inconclusive"),
+}
+
+
+def render_verdict(
+    results: list[CheckResult],
+    agent: DoneInput | None,
+    *,
+    agent_complete: bool,
+    advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
+) -> str:
+    """The headline line. When the agent finished, the model's `verdict_level` +
+    `verdict` ARE the headline — except a HIGH-severity deterministic check
+    (leaked secret / critical-path) floors it to the deterministic 🔴 so the model
+    can't bury a hard fact. Otherwise (no agent / incomplete) the deterministic
+    ladder leads.
+    """
+    if agent is not None and agent_complete:
+        high_fail = [r for r in results if not r.passed and r.severity >= Severity.HIGH]
+        if high_fail:
+            # Safety floor: a leaked secret / critical-path touch is not the model's
+            # to downgrade. Use the deterministic HIGH headline verbatim.
+            return build_verdict(
+                results, agent, agent_complete=agent_complete,
+                advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+            )
+        glyph, title = _VERDICT_STYLE.get(agent.verdict_level, _VERDICT_STYLE["attention"])
+        # For "Clean" / low, just show the glyph+title — no trailing chatter.
+        if agent.verdict_level == "low":
+            return f"{glyph} **{title}**"
+        tail = _severity_mix([r for r in results if not r.passed])
+        line = f"{glyph} **{title}** — {agent.verdict.strip()}"
+        return f"{line} · {tail}" if tail else line
+
+    # No agent, or it didn't finish → deterministic ladder.
+    return build_verdict(
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+    )
+
+
+def pick_label(
     results: list[CheckResult],
     agent: DoneInput | None = None,
     *,
@@ -420,16 +483,21 @@ def pick_facet_labels(
     `ai-authored` and nothing else. The intent-mismatch facet only fires when the
     agent actually finished (a force-finalized run is not trusted).
     """
-    summary = ChecksSummary.from_results(results)
+    failed = {r.name for r in results if not r.passed}
+    agent_ok = agent is not None and agent_complete
     labels: list[str] = []
 
-    if summary.high_fail:
+    # blocker = a serious problem, from either source: a HIGH-severity check, OR
+    # the agent's own 🔴 high verdict. So a serious agent finding is labelled
+    # seriously, not merely as intent-mismatch.
+    high_check = any(not r.passed and r.severity >= Severity.HIGH for r in results)
+    if high_check or (agent_ok and agent.verdict_level == "high"):
         labels.append(LABEL_BLOCKER)
     if summary.failed_names & _SECURITY_CHECKS:
         labels.append(LABEL_SECURITY)
     if summary.failed_names & _AI_CHECKS:
         labels.append(LABEL_AI_AUTHORED)
-    if agent is not None and agent_complete and not agent.intent_matches_diff:
+    if agent_ok and not agent.intent_matches_diff:
         labels.append(LABEL_INTENT_MISMATCH)
 
     return labels

@@ -21,6 +21,10 @@ assessment. Call this with your structured output. After this is called, no more
 tools will be invoked.
 
 Before calling this, make sure:
+- `verdict_level` is your honest overall read (high/attention/minor/low/
+  inconclusive) and `verdict` is your one-line headline in your own words — this
+  is the model's call, informed by the checks you were given. (A leaked secret or
+  critical-path touch is floored to 🔴 by the app regardless.)
 - Your `summary` describes what the diff actually changes (not just what the PR
   description claims).
 - Every item in `attention` is a spot you verified from the diff or a tool, cited
