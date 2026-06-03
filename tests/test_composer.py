@@ -48,12 +48,12 @@ def test_comment_leads_with_verdict_no_headings_no_table():
     assert comment.lstrip().startswith(("🟢", "🟡", "🟠", "🔴", "⚠️"))
 
 
-def test_comment_no_agent_lists_failing_checks_as_fallback():
+def test_comment_no_agent_shows_failing_checks_table():
     results = [CheckResult("title_quality", False, "Title is a single word")]
     comment = build_comment(results)
-    assert "Checks needing attention" in comment
+    assert "Failing checks" in comment
+    assert "| Check | Severity | Detail |" in comment
     assert "Title is a single word" in comment
-    assert "| Check |" not in comment  # prose, not a table
 
 
 def test_comment_all_passed_no_table_or_fallback():
@@ -121,17 +121,17 @@ def test_comment_no_agent_section_when_absent():
     assert "### Agent Review" not in comment
 
 
-def test_format_agent_assessment_flags_intent_mismatch():
+def test_agent_body_omits_intent_mismatch_block():
+    # The mismatch is carried by the verdict headline, not repeated as a body block.
     out = format_agent_assessment(
         _assessment(intent_matches_diff=False, intent_mismatch_reason="Adds telemetry, not a fix")
     )
-    assert "Intent vs. diff mismatch" in out
-    assert "Adds telemetry, not a fix" in out
+    assert "Intent vs. diff mismatch" not in out
 
 
-def test_format_agent_assessment_renders_open_questions():
+def test_format_agent_assessment_renders_questions():
     out = format_agent_assessment(_assessment(open_questions=["Is the lock released on error?"]))
-    assert "Open questions" in out
+    assert "Questions" in out
     assert "Is the lock released on error?" in out
 
 
@@ -188,6 +188,22 @@ def test_pick_label_all_fail():
 
 
 # ── Clickable locations (granular) ────────────────────────────────────────────
+
+
+def test_location_links_even_with_trailing_text():
+    # The agent sometimes appends prose to the anchor; we still link the path:line.
+    ctx = _link_ctx("scrape_jobs.py")
+    out = format_agent_assessment(
+        _assessment(attention=[_item("scrape_jobs.py:236 (auth header added)", "high", "high")]), ctx
+    )
+    assert "blob/abc123/scrape_jobs.py#L236)" in out
+    assert "(auth header added)" in out  # trailing prose kept
+
+
+def test_agent_high_verdict_applies_blocker_label():
+    # A serious agent verdict is labelled seriously, not merely intent-mismatch.
+    labels = pick_facet_labels([CheckResult("t", True, "")], _assessment(verdict_level="high"))
+    assert LABEL_BLOCKER in labels
 
 
 def test_location_links_to_line_when_file_known():
@@ -298,7 +314,6 @@ def test_verdict_is_authored_by_the_agent():
     )
     assert "🔴 **High concern**" in comment
     assert "only logging was added" in comment
-    assert "Intent vs. diff mismatch" in comment  # also surfaced in the body
 
 
 def test_verdict_secret_beats_intent_mismatch():
