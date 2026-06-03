@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     agent_timeout_s: float = 90.0
 
     stats_bearer_token: str = ""
+    # /stats is closed by default: with no bearer token it returns 403. Set
+    # STATS_PUBLIC=true to expose it without auth (e.g. behind a trusted network).
+    stats_public: bool = False
 
     def agent_enabled_for(self, repo: str) -> bool:
         """True if the review agent is allowlisted for `repo` ("owner/name")."""
