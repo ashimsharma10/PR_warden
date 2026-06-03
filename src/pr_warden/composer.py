@@ -199,13 +199,13 @@ def build_comment(
 ) -> str:
     """One consolidated review — no section headings, no check table.
 
-    A deterministic verdict line leads (it owns the headline and is reproducible;
-    a leaked secret surfaces here regardless of what the LLM says). When the agent
-    ran, its structured read *is* the body — the deterministic checks were given
-    to it as context, so it speaks for them. When the agent didn't run, a
-    deterministic fallback lists the failing checks so the comment still informs.
+    When the agent ran, the model authors the whole report including the verdict
+    (the deterministic checks were given to it as context, so it speaks for them);
+    a HIGH-severity check still floors the verdict to 🔴 so a leaked secret can't
+    be buried. When the agent didn't run, a deterministic verdict leads and a
+    fallback lists the failing checks so the comment still informs.
     """
-    verdict = build_verdict(
+    verdict = render_verdict(
         results, agent, agent_complete=agent_complete,
         advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
@@ -363,6 +363,52 @@ def build_verdict(
         results, agent, agent_complete=agent_complete,
         advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )[1]
+
+
+# verdict_level → (glyph, title). The model picks the level; the app maps it to a
+# consistent glyph and title word, and the model's `verdict` text follows.
+_VERDICT_STYLE: dict[str, tuple[str, str]] = {
+    "high": ("🔴", "High concern"),
+    "attention": ("🟠", "Worth a look"),
+    "minor": ("🟡", "Minor note"),
+    "low": ("🟢", "Looks low-risk"),
+    "inconclusive": ("⚠️", "Inconclusive"),
+}
+
+
+def render_verdict(
+    results: list[CheckResult],
+    agent: DoneInput | None,
+    *,
+    agent_complete: bool,
+    advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
+) -> str:
+    """The headline line. When the agent finished, the model's `verdict_level` +
+    `verdict` ARE the headline — except a HIGH-severity deterministic check
+    (leaked secret / critical-path) floors it to the deterministic 🔴 so the model
+    can't bury a hard fact. Otherwise (no agent / incomplete) the deterministic
+    ladder leads.
+    """
+    if agent is not None and agent_complete:
+        high_fail = [r for r in results if not r.passed and r.severity >= Severity.HIGH]
+        if high_fail:
+            # Safety floor: a leaked secret / critical-path touch is not the model's
+            # to downgrade. Use the deterministic HIGH headline verbatim.
+            return build_verdict(
+                results, agent, agent_complete=agent_complete,
+                advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+            )
+        glyph, title = _VERDICT_STYLE.get(agent.verdict_level, _VERDICT_STYLE["attention"])
+        tail = _severity_mix([r for r in results if not r.passed])
+        line = f"{glyph} **{title}** — {agent.verdict.strip()}"
+        return f"{line} · {tail}" if tail else line
+
+    # No agent, or it didn't finish → deterministic ladder.
+    return build_verdict(
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+    )
 
 
 def pick_label(

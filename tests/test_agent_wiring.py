@@ -54,7 +54,10 @@ def _event() -> PullRequestEvent:
 
 def _agent_result() -> AgentResult:
     return AgentResult(
-        assessment=DoneInput(summary="looks fine", intent_matches_diff=True, confidence=0.7),
+        assessment=DoneInput(
+            verdict_level="low", verdict="looks fine",
+            summary="looks fine", intent_matches_diff=True, confidence=0.7,
+        ),
         cost_usd=0.02,
         stopped_for="done",
     )

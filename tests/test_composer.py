@@ -18,6 +18,8 @@ from pr_warden.composer import (
 
 def _assessment(**kwargs) -> DoneInput:
     defaults = dict(
+        verdict_level="attention",
+        verdict="Guards the charge, but the retry path has no test.",
         summary="Guards the charge behind an already_charged check.",
         files_touched=["payments.py"],
         intent_matches_diff=True,
@@ -283,14 +285,20 @@ def _clean() -> list:
     return [CheckResult("title_quality", True, ""), CheckResult("pr_size", True, "")]
 
 
-def test_verdict_intent_mismatch_headlines_over_clean_checks():
-    # The marquee fix: every check passes, but the agent caught claim ≠ diff.
+def test_verdict_is_authored_by_the_agent():
+    # The model owns the headline: its verdict_level → glyph/title, its words.
     comment = build_comment(
-        _clean(), agent=_assessment(intent_matches_diff=False, intent_mismatch_reason="adds logging, not a fix")
+        _clean(),
+        agent=_assessment(
+            verdict_level="high",
+            verdict="the diff doesn't match the stated intent — only logging was added",
+            intent_matches_diff=False,
+            intent_mismatch_reason="adds logging, not a fix",
+        ),
     )
-    assert "High concern" in comment
-    assert "doesn't match the stated intent" in comment
-    assert "adds logging, not a fix" in comment
+    assert "🔴 **High concern**" in comment
+    assert "only logging was added" in comment
+    assert "Intent vs. diff mismatch" in comment  # also surfaced in the body
 
 
 def test_verdict_secret_beats_intent_mismatch():
@@ -323,16 +331,22 @@ def test_verdict_incomplete_agent_does_not_soften_a_secret():
     assert "Inconclusive" not in comment
 
 
-def test_verdict_low_confidence_is_inconclusive():
-    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.3))
-    assert "Inconclusive" in comment
-    assert "low-confidence" in comment
+def test_verdict_agent_can_set_inconclusive():
+    comment = build_comment(
+        _clean(),
+        agent=_assessment(verdict_level="inconclusive", verdict="couldn't verify the migration path"),
+    )
+    assert "⚠️ **Inconclusive**" in comment
+    assert "couldn't verify the migration path" in comment
 
 
-def test_verdict_clean_with_confident_agent_is_low_risk():
-    comment = build_comment(_clean(), agent=_assessment(attention=[], confidence=0.85))
-    assert "Looks low-risk" in comment
-    assert "still your call" in comment
+def test_verdict_agent_low_risk():
+    comment = build_comment(
+        _clean(),
+        agent=_assessment(verdict_level="low", verdict="small, focused; claim matches the diff"),
+    )
+    assert "🟢 **Looks low-risk**" in comment
+    assert "claim matches the diff" in comment
 
 
 def test_label_escalates_on_agent_intent_mismatch():
@@ -360,13 +374,14 @@ def test_label_no_agent_reduces_to_checks_only():
     assert pick_label([CheckResult("no_tests", False, "x", severity=Severity.MEDIUM)]) == LABEL_NEEDS_ATTENTION
 
 
-def test_label_and_verdict_never_disagree():
-    # The invariant the shared concern level guarantees: a "High concern" /
-    # "Worth a look" headline always coincides with a needs-attention label.
-    agent = _assessment(intent_matches_diff=False)
-    comment = build_comment(_clean(), agent=agent)
-    assert "High concern" in comment
-    assert pick_label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+def test_verdict_high_check_floors_the_agent_verdict():
+    # Safety floor: even if the model says low-risk, a leaked secret forces 🔴 —
+    # the deterministic line, not the model's words.
+    results = [CheckResult("secret_leak", False, "AWS key in config.py", severity=Severity.HIGH)]
+    comment = build_comment(results, agent=_assessment(verdict_level="low", verdict="looks fine"))
+    assert "🔴 **High concern**" in comment
+    assert "Secret Leak" in comment
+    assert "looks fine" not in comment  # the model could not downgrade the secret
 
 
 def test_verdict_never_recommends_merge():
