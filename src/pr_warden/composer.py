@@ -7,10 +7,10 @@ from urllib.parse import quote
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
 
-# Retired: PRwarden no longer applies a generic status label. The verdict
-# headline in the comment carries the overall read; specific facet labels (below)
-# carry queue-level filtering. These two are kept only so the applier can strip
-# them from PRs labelled by an earlier version, and as an analytics value.
+# Retired: PRwarden no longer applies a generic status label, nor derives one.
+# The verdict headline in the comment carries the overall read; specific facet
+# labels (below) carry queue-level filtering. These two names are kept only so
+# the applier can strip them from PRs labelled by an earlier version.
 LABEL_CLEAN = "prwarden:clean"
 LABEL_NEEDS_ATTENTION = "prwarden:needs-attention"
 
@@ -55,30 +55,52 @@ class Concern(IntEnum):
 DEFAULT_ADVISORY_THRESHOLD = 3
 
 
-def _advisory_escalates(failed: list[CheckResult], advisory_threshold: int | None) -> bool:
+@dataclass(frozen=True)
+class ChecksSummary:
+    """The deterministic checks reduced to the handful of facts every downstream
+    decision needs — computed once, then read by the verdict ladder, the facet
+    labels, and the needs-attention test. Without it, each of those re-derives
+    "what failed and how badly" inline and they can quietly drift apart.
+    """
+
+    failed: tuple[CheckResult, ...]
+    failed_names: frozenset[str]
+    high_fail: tuple[CheckResult, ...]       # severity >= HIGH
+    attention_plus: tuple[CheckResult, ...]  # severity >= ATTENTION_THRESHOLD
+    advisory_count: int                      # failures below ATTENTION_THRESHOLD
+
+    @classmethod
+    def from_results(cls, results: list[CheckResult]) -> "ChecksSummary":
+        failed = tuple(r for r in results if not r.passed)
+        return cls(
+            failed=failed,
+            failed_names=frozenset(r.name for r in failed),
+            high_fail=tuple(r for r in failed if r.severity >= Severity.HIGH),
+            attention_plus=tuple(r for r in failed if r.severity >= ATTENTION_THRESHOLD),
+            advisory_count=sum(1 for r in failed if r.severity < ATTENTION_THRESHOLD),
+        )
+
+
+def _advisory_escalates(advisory_count: int, advisory_threshold: int | None) -> bool:
     """True when enough advisory (sub-threshold) failures piled up to escalate.
 
     `advisory_threshold` None or <= 0 disables the rule.
     """
     if not advisory_threshold or advisory_threshold <= 0:
         return False
-    advisories = sum(1 for r in failed if r.severity < ATTENTION_THRESHOLD)
-    return advisories >= advisory_threshold
+    return advisory_count >= advisory_threshold
 
 
-def _needs_attention(
-    results: list[CheckResult], advisory_threshold: int | None
-) -> bool:
+def _needs_attention(summary: ChecksSummary, advisory_threshold: int | None) -> bool:
     """The single source of truth for the label decision.
 
     needs-attention when either a check at/above the attention threshold failed,
-    OR enough advisory checks failed together to escalate. pick_label and the
+    OR enough advisory checks failed together to escalate. verdict_level and the
     comment banner both route through here so they can never disagree.
     """
-    failed = [r for r in results if not r.passed]
-    if any(r.severity >= ATTENTION_THRESHOLD for r in failed):
+    if summary.attention_plus:
         return True
-    return _advisory_escalates(failed, advisory_threshold)
+    return _advisory_escalates(summary.advisory_count, advisory_threshold)
 
 
 @dataclass(frozen=True)
@@ -100,7 +122,10 @@ class LinkContext:
     pr_number: int | None = None
 
 
-_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?$")
+# Match a LEADING `path:line` (or range) anchor; any trailing prose is kept as-is.
+# Being lenient about trailing text means a location like
+# "auth.py:21 (the fallback token)" still links the `auth.py:21` part.
+_LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?(?P<rest>.*)$")
 
 
 def _diff_anchor(path: str, line: str | None) -> str:
@@ -127,24 +152,27 @@ def _location_url(link_ctx: LinkContext, path: str, line: str | None, end: str |
 
 
 def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
-    """A cited location → a Markdown link on GitHub, but only when it resolves to a
-    real file in the PR. A changed file links to the PR diff (the change itself); an
-    unchanged-but-existing file links to the blob. Anything else stays plain `code`
-    so a guessed/broken link never reaches a maintainer. Adds zero visible length."""
-    code = f"`{location}`"
-    if link_ctx is None:
-        return code
+    """A cited location → a Markdown link to the line on GitHub, but only when the
+    path resolves to a real file in the PR. Anything else stays plain `code` so a
+    guessed/broken link never reaches a maintainer."""
     loc = location.strip()
+    if link_ctx is None:
+        return f"`{loc}`"
+
     m = _LOCATION_RE.match(loc)
-    if m:
+    if m and m.group("path") in link_ctx.known_paths:
         path, line, end = m.group("path"), m.group("line"), m.group("end")
-    elif loc in link_ctx.known_paths:
-        path, line, end = loc, None, None
-    else:
-        return code
-    if path not in link_ctx.known_paths:
-        return code
-    return f"[{code}]({_location_url(link_ctx, path, line, end)})"
+        span = f"{path}:{line}" + (f"-{end}" if end else "")
+        anchor = f"#L{line}" + (f"-L{end}" if end else "")
+        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
+        link = f"[`{span}`]({url})"
+        rest = m.group("rest").strip()
+        return f"{link} {rest}" if rest else link
+
+    if loc in link_ctx.known_paths:  # a bare path, no line
+        url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(loc, safe='/')}"
+        return f"[`{loc}`]({url})"
+    return f"`{loc}`"
 
 
 def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) -> list[str]:
@@ -160,24 +188,28 @@ def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) 
 
 
 def format_agent_assessment(assessment: DoneInput, link_ctx: LinkContext | None = None) -> str:
-    """Render the agent's structured read as the review body (no section heading —
-    it flows straight under the verdict). Summary, then where-to-focus, then up to
-    two open questions, then confidence."""
+    """Render the agent's read — kept deliberately short. When the PR is low-risk
+    and there's nothing to surface, the summary alone suffices (or nothing, when
+    the verdict already says Clean). Otherwise: summary → focus → questions."""
     lines = [assessment.summary.strip()]
-
-    if not assessment.intent_matches_diff:
-        reason = assessment.intent_mismatch_reason or "no reason given"
-        lines.append(f"\n**⚠️ Intent vs. diff mismatch:** {reason}")
 
     if assessment.attention:
         lines += _format_attention(assessment.attention, link_ctx)
 
     if assessment.open_questions:
-        lines.append("\n**Open questions:**")
+        lines.append("\n**Questions:**")
         lines += [f"- {q}" for q in assessment.open_questions[:2]]
 
-    lines.append(f"\n*Confidence: {assessment.confidence:.0%}*")
     return "\n".join(lines)
+
+
+# Severity badge for the failing-checks table. Word + glyph so the signal
+# survives in clients without emoji and tests can assert on the word.
+_SEV_BADGE: dict[Severity, str] = {
+    Severity.HIGH: "🔴 High",
+    Severity.MEDIUM: "🟠 Medium",
+    Severity.LOW: "🟡 Advisory",
+}
 
 
 def format_changes(
@@ -208,14 +240,18 @@ def format_changes(
 
 
 def _format_failing_checks(results: list[CheckResult]) -> str | None:
-    """Deterministic fallback body when no LLM review ran: the failing checks as a
-    short list, highest severity first. Returns None if nothing failed."""
+    """The failed deterministic checks as a compact table — only failures, highest
+    severity first; passing checks are never shown. Returns None if nothing failed."""
     failed = sorted((r for r in results if not r.passed), key=lambda r: -int(r.severity))
     if not failed:
         return None
-    lines = ["\n**Checks needing attention:**"]
-    lines += [f"- {r.name.replace('_', ' ').title()} — {r.reason}" for r in failed]
-    return "\n".join(lines)
+    rows = [
+        f"| {r.name.replace('_', ' ').title()} | {_SEV_BADGE[r.severity]} | {r.reason} |"
+        for r in failed
+    ]
+    return "\n".join(
+        ["\n**Failing checks**", "", "| Check | Severity | Detail |", "|---|---|---|", *rows]
+    )
 
 
 def build_comment(
@@ -227,15 +263,14 @@ def build_comment(
     changes: str | None = None,
     link_ctx: LinkContext | None = None,
 ) -> str:
-    """One consolidated review — no section headings, no check table.
+    """One consolidated, deliberately short review.
 
-    A deterministic verdict line leads (it owns the headline and is reproducible;
-    a leaked secret surfaces here regardless of what the LLM says). When the agent
-    ran, its structured read *is* the body — the deterministic checks were given
-    to it as context, so it speaks for them. When the agent didn't run, a
-    deterministic fallback lists the failing checks so the comment still informs.
+    Verdict headline → the agent's brief read (when it ran) → a compact table of
+    only the *failing* deterministic checks. The model authors the verdict; a
+    HIGH-severity check still floors it to 🔴 so a leaked secret can't be buried.
+    With no agent, the headline + the failing-checks table still inform.
     """
-    verdict = build_verdict(
+    verdict = render_verdict(
         results, agent, agent_complete=agent_complete,
         advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
@@ -245,10 +280,12 @@ def build_comment(
 
     if agent is not None:
         parts.append(f"\n{format_agent_assessment(agent, link_ctx)}")
-    else:
-        fallback = _format_failing_checks(results)
-        if fallback:
-            parts.append(fallback)
+
+    # The failing-checks table shows in both cases — it's the deterministic record
+    # of what tripped (only failures; passing checks are never listed).
+    failing = _format_failing_checks(results)
+    if failing:
+        parts.append(failing)
 
     parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
     return "\n".join(parts)
@@ -305,9 +342,8 @@ def _concern(
 
     It is a triage read, never a ruling — it never tells the maintainer to merge.
     """
-    failed = [r for r in results if not r.passed]
-    high_fail = [r for r in failed if r.severity >= Severity.HIGH]
-    mix = _severity_mix(failed)
+    summary = ChecksSummary.from_results(results)
+    mix = _severity_mix(summary.failed)
     # Only trust agent fields from a run that actually finished; a force-finalized
     # fallback carries default-clean values that must never read as a real verdict.
     agent_ok = agent is not None and agent_complete
@@ -317,8 +353,8 @@ def _concern(
         return f"{s} · {tail}" if tail else s
 
     # ── 🔴 hard concerns ──────────────────────────────────────────────────────
-    if high_fail:
-        c = max(high_fail, key=lambda r: r.severity)
+    if summary.high_fail:
+        c = max(summary.high_fail, key=lambda r: r.severity)
         return Concern.HIGH, line("🔴", "High concern", f"{_check_name(c)}: {c.reason}", tail=mix)
     if agent_ok and not agent.intent_matches_diff:
         reason = agent.intent_mismatch_reason or "no reason given"
@@ -338,13 +374,12 @@ def _concern(
             "🟠", "Worth a look",
             f"start at {_linkify_location(top.location, link_ctx)} — {top.why}", tail=mix,
         )
-    if _needs_attention(results, advisory_threshold):
-        medplus = [r for r in failed if r.severity >= ATTENTION_THRESHOLD]
-        if medplus:
-            c = max(medplus, key=lambda r: r.severity)
+    if _needs_attention(summary, advisory_threshold):
+        if summary.attention_plus:
+            c = max(summary.attention_plus, key=lambda r: r.severity)
             lead = f"{_check_name(c)}: {c.reason}"
         else:  # escalated purely on a pile-up of advisory nits
-            lead = f"{len(failed)} advisory checks piled up (≥{advisory_threshold} escalates)"
+            lead = f"{len(summary.failed)} advisory checks piled up (≥{advisory_threshold} escalates)"
         return Concern.ATTENTION, line("🟠", "Worth a look", lead, tail=mix)
 
     # ── ⚠️ inconclusive (downgrades only a would-be 🟡/🟢; never escalates) ────
@@ -364,8 +399,8 @@ def _concern(
         )
 
     # ── 🟡 advisory-only flags ────────────────────────────────────────────────
-    if failed:
-        n = len(failed)
+    if summary.failed:
+        n = len(summary.failed)
         return Concern.INFO, line(
             "🟡", "Minor flags", f"{n} advisory {'check' if n == 1 else 'checks'}, nothing blocking"
         )
@@ -395,28 +430,76 @@ def build_verdict(
     )[1]
 
 
+# verdict_level → (glyph, title). The model picks the level; the app maps it to a
+# consistent glyph and title word, and the model's `verdict` text follows.
+_VERDICT_STYLE: dict[str, tuple[str, str]] = {
+    "high": ("🔴", "High concern"),
+    "attention": ("🟠", "Worth a look"),
+    "minor": ("🟡", "Minor note"),
+    "low": ("✅", "Clean"),
+    "inconclusive": ("⚠️", "Inconclusive"),
+}
+
+
+def render_verdict(
+    results: list[CheckResult],
+    agent: DoneInput | None,
+    *,
+    agent_complete: bool,
+    advisory_threshold: int | None,
+    link_ctx: LinkContext | None = None,
+) -> str:
+    """The headline line. When the agent finished, the model's `verdict_level` +
+    `verdict` ARE the headline — except a HIGH-severity deterministic check
+    (leaked secret / critical-path) floors it to the deterministic 🔴 so the model
+    can't bury a hard fact. Otherwise (no agent / incomplete) the deterministic
+    ladder leads.
+    """
+    if agent is not None and agent_complete:
+        high_fail = [r for r in results if not r.passed and r.severity >= Severity.HIGH]
+        if high_fail:
+            # Safety floor: a leaked secret / critical-path touch is not the model's
+            # to downgrade. Use the deterministic HIGH headline verbatim.
+            return build_verdict(
+                results, agent, agent_complete=agent_complete,
+                advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+            )
+        glyph, title = _VERDICT_STYLE.get(agent.verdict_level, _VERDICT_STYLE["attention"])
+        # For "Clean" / low, just show the glyph+title — no trailing chatter.
+        if agent.verdict_level == "low":
+            return f"{glyph} **{title}**"
+        tail = _severity_mix([r for r in results if not r.passed])
+        line = f"{glyph} **{title}** — {agent.verdict.strip()}"
+        return f"{line} · {tail}" if tail else line
+
+    # No agent, or it didn't finish → deterministic ladder.
+    return build_verdict(
+        results, agent, agent_complete=agent_complete,
+        advisory_threshold=advisory_threshold, link_ctx=link_ctx,
+    )
+
+
 def pick_label(
     results: list[CheckResult],
     agent: DoneInput | None = None,
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
-) -> str:
-    """The status label, driven by the same concern level as the verdict headline.
+) -> Concern:
+    """The verdict's concern level — the same ladder that drives the headline.
 
-    needs-attention iff `Concern >= ATTENTION`: a MEDIUM+ check failed, advisories
-    piled up, OR — when the agent finished — it flagged the diff as not matching
-    the stated intent or surfaced a high-priority (risk × centrality) spot. So the
-    label and the headline can never disagree.
+    Recorded per run for `/stats` analytics. PRwarden no longer turns this into a
+    status *label* (that's retired — see RETIRED_LABELS); the verdict headline
+    carries the overall read and facet labels carry queue filtering. Exposing the
+    level itself keeps analytics richer than the old binary clean/needs-attention:
+    `Concern >= ATTENTION` is the boundary the old `needs-attention` label marked.
 
-    A single advisory (LOW) failure, or an inconclusive/low-confidence agent, keeps
-    the PR `clean` — a nit or a timed-out agent must not raise the same flag as a
-    leaked secret. With `agent=None` this reduces to the original checks-only rule.
+    With `agent=None` this reduces to the original checks-only rule.
     """
     level, _ = _concern(
         results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
     )
-    return LABEL_NEEDS_ATTENTION if level >= Concern.ATTENTION else LABEL_CLEAN
+    return level
 
 
 def pick_facet_labels(
@@ -432,15 +515,20 @@ def pick_facet_labels(
     agent actually finished (a force-finalized run is not trusted).
     """
     failed = {r.name for r in results if not r.passed}
+    agent_ok = agent is not None and agent_complete
     labels: list[str] = []
 
-    if any(not r.passed and r.severity >= Severity.HIGH for r in results):
+    # blocker = a serious problem, from either source: a HIGH-severity check, OR
+    # the agent's own 🔴 high verdict. So a serious agent finding is labelled
+    # seriously, not merely as intent-mismatch.
+    high_check = any(not r.passed and r.severity >= Severity.HIGH for r in results)
+    if high_check or (agent_ok and agent.verdict_level == "high"):
         labels.append(LABEL_BLOCKER)
-    if failed & _SECURITY_CHECKS:
+    if summary.failed_names & _SECURITY_CHECKS:
         labels.append(LABEL_SECURITY)
-    if failed & _AI_CHECKS:
+    if summary.failed_names & _AI_CHECKS:
         labels.append(LABEL_AI_AUTHORED)
-    if agent is not None and agent_complete and not agent.intent_matches_diff:
+    if agent_ok and not agent.intent_matches_diff:
         labels.append(LABEL_INTENT_MISMATCH)
 
     return labels

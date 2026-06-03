@@ -7,4 +7,3 @@ os.environ.setdefault("GITHUB_WEBHOOK_SECRET", "test-secret-32chars-xxxxxxxxxxxx
 # eagerly builds the async engine — works without a Postgres driver in tests.
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("STATS_BEARER_TOKEN", "test-stats-token")
-os.environ.setdefault("BOT_OWNER_USERNAME", "testowner")

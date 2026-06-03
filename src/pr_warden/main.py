@@ -20,7 +20,7 @@ from pr_warden.composer import (
     build_comment,
     format_changes,
     pick_facet_labels,
-    pick_label,
+    verdict_level,
 )
 from pr_warden.config import settings
 from pr_warden.db import async_session_factory, engine, get_session
@@ -229,9 +229,10 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         # and so an incomplete run never escalates the status label.
         agent_complete = agent_result is not None and agent_result.stopped_for == "done"
 
-        # Label and headline both derive from the same concern level, so the agent
-        # escalates status (e.g. an intent mismatch → needs-attention) consistently.
-        label = pick_label(
+        # The verdict headline and the facet labels both derive from this concern
+        # level (see _concern); we record it per run for /stats. It is no longer
+        # turned into a status label — that's retired.
+        level = verdict_level(
             results,
             agent_assessment,
             agent_complete=agent_complete,
@@ -294,8 +295,8 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             # Apply facet labels only — the overall read lives in the verdict
             # headline, not a generic status label. Reconcile against the full
             # managed set so stale facets and any retired status label from an
-            # earlier version get stripped. `label` (the would-be status) is kept
-            # for /stats analytics, not applied. Both ops are idempotent.
+            # earlier version get stripped. The verdict `level` is recorded for
+            # /stats analytics, never applied as a label. Both ops are idempotent.
             desired_labels = set(
                 pick_facet_labels(results, agent_assessment, agent_complete=agent_complete)
             )
@@ -317,13 +318,13 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                     agent_result=(
                         agent_result.model_dump(mode="json") if agent_result else None
                     ),
-                    action_taken=label,
+                    action_taken=level.name.lower(),
                     comment_id=comment_id,
                 )
             )
             await session.commit()
 
-        log.info("pr_event.done", label=label, comment_id=comment_id)
+        log.info("pr_event.done", level=level.name.lower(), comment_id=comment_id)
 
     except Exception:
         log.exception("pr_event.failed")
