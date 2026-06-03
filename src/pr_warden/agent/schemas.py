@@ -41,13 +41,14 @@ class AttentionItem(BaseModel):
     """
 
     location: str = Field(
-        description="Where to look — `path:line`, a file, or an issue ref. The "
-        "concrete anchor for the claim, never a vague area name."
+        description="ONLY the anchor: `path:line` (or `path:line-range`), or a bare "
+        "file path. Nothing else — no parenthetical, no description (that belongs "
+        "in `why`). It's turned into a clickable link, so keep it a clean path:line."
     )
     why: str = Field(
-        description="One line: why a maintainer must look here, naming the "
-        "downstream impact (what depends on this, what breaks) — not a restatement "
-        "of the code."
+        description="One short line: why a maintainer must look here and the "
+        "downstream impact — what breaks or depends on it. Not a restatement of "
+        "the code, not a paragraph."
     )
     risk: Literal["high", "medium", "low"] = Field(
         description="How likely this is to be wrong or harmful if it ships unreviewed."
@@ -80,22 +81,21 @@ class DoneInput(ToolInput):
     """
 
     verdict_level: Literal["high", "attention", "minor", "low", "inconclusive"] = Field(
-        description="Your overall read, picked honestly: 'high' (a real problem — "
-        "wrong, unsafe, or claim≠diff), 'attention' (worth a careful look), 'minor' "
-        "(small nits only), 'low' (looks low-risk), 'inconclusive' (you couldn't "
-        "tell). This sets the headline glyph; raise it freely, don't undersell risk."
+        description="Your overall read: 'high' (a real problem — wrong, unsafe, or "
+        "claim≠diff), 'attention' (worth a careful look), 'minor' (small nits only), "
+        "'low' (clean, no concerns at all), 'inconclusive' (you couldn't tell). "
+        "Pick 'low' when the PR is fine — the app renders it as ✅ Clean with nothing "
+        "else. Don't undersell risk."
     )
     verdict: str = Field(
-        description="One line: the headline read in your own words — the single "
-        "thing a 30-second maintainer must know and why it matters. Grounded in what "
-        "you read; no glyph, no 'merge'/'approve'."
+        description="One short line: the headline in your own words. For 'low' this "
+        "is ignored (the app just says ✅ Clean). For all other levels: the single "
+        "thing a maintainer must know. No glyph, no 'merge'/'approve'."
     )
     summary: str = Field(
-        description="What the diff actually changes, grounded in the code you read "
-        "— not a restatement of the PR description. Scale the length to the change: "
-        "one sentence for a small/focused PR; a short paragraph for a large or "
-        "complex one, covering the moving parts and anything non-obvious. Don't pad "
-        "a simple change, and don't compress a genuinely complex one into one line."
+        description="ONE sentence. What the PR does — nothing else. No findings, "
+        "no concerns (those go in `attention` and `verdict`). Example: 'Adds a "
+        "centralized auth layer routing API keys through AuthManager.' That's it."
     )
     files_touched: list[str] = Field(
         default_factory=list,
@@ -119,8 +119,10 @@ class DoneInput(ToolInput):
     )
     open_questions: list[str] = Field(
         default_factory=list,
-        description="Everything you could not confirm, phrased as specific things "
-        "for the maintainer to check. Put uncertainty here; do not guess.",
+        description="Rendered as 'Questions'. At most 1-2, and ONLY when something "
+        "is non-obvious and worth the maintainer's judgment — an antipattern, a "
+        "design/taste call, or a real uncertainty. Skip the obvious (e.g. \"don't "
+        "hardcode secrets\") and anything you already verified. Usually empty.",
     )
     confidence: float = Field(
         ge=0.0,
