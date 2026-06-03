@@ -135,10 +135,9 @@ def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) 
 
 
 def format_agent_assessment(assessment: DoneInput, link_ctx: LinkContext | None = None) -> str:
-    """Render the agent's read as the review body — kept deliberately short: a
-    brief summary, where to focus, and questions only when the model raised any.
-    The verdict headline already carries the claim-vs-diff read, so it isn't
-    repeated here."""
+    """Render the agent's read — kept deliberately short. When the PR is low-risk
+    and there's nothing to surface, the summary alone suffices (or nothing, when
+    the verdict already says Clean). Otherwise: summary → focus → questions."""
     lines = [assessment.summary.strip()]
 
     if assessment.attention:
@@ -148,7 +147,6 @@ def format_agent_assessment(assessment: DoneInput, link_ctx: LinkContext | None 
         lines.append("\n**Questions:**")
         lines += [f"- {q}" for q in assessment.open_questions[:2]]
 
-    lines.append(f"\n*Confidence: {assessment.confidence:.0%}*")
     return "\n".join(lines)
 
 
@@ -387,7 +385,7 @@ _VERDICT_STYLE: dict[str, tuple[str, str]] = {
     "high": ("🔴", "High concern"),
     "attention": ("🟠", "Worth a look"),
     "minor": ("🟡", "Minor note"),
-    "low": ("🟢", "Looks low-risk"),
+    "low": ("✅", "Clean"),
     "inconclusive": ("⚠️", "Inconclusive"),
 }
 
@@ -416,6 +414,9 @@ def render_verdict(
                 advisory_threshold=advisory_threshold, link_ctx=link_ctx,
             )
         glyph, title = _VERDICT_STYLE.get(agent.verdict_level, _VERDICT_STYLE["attention"])
+        # For "Clean" / low, just show the glyph+title — no trailing chatter.
+        if agent.verdict_level == "low":
+            return f"{glyph} **{title}**"
         tail = _severity_mix([r for r in results if not r.passed])
         line = f"{glyph} **{title}** — {agent.verdict.strip()}"
         return f"{line} · {tail}" if tail else line

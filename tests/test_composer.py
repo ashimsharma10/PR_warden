@@ -113,7 +113,7 @@ def test_comment_agent_body_has_no_heading():
     assert "Guards the charge" in comment           # agent summary
     assert "Where to focus" in comment
     assert "payments.py:42" in comment
-    assert "Confidence: 80%" in comment
+    # Confidence line was dropped for brevity — just verify content flows.
 
 
 def test_comment_no_agent_section_when_absent():
@@ -336,7 +336,7 @@ def test_verdict_incomplete_agent_is_inconclusive_not_clean():
     comment = build_comment(_clean(), agent=_assessment(attention=[]), agent_complete=False)
     assert "Inconclusive" in comment
     assert "didn't finish" in comment
-    assert "low-risk" not in comment
+    assert "Clean" not in comment
 
 
 def test_verdict_incomplete_agent_does_not_soften_a_secret():
@@ -355,13 +355,13 @@ def test_verdict_agent_can_set_inconclusive():
     assert "couldn't verify the migration path" in comment
 
 
-def test_verdict_agent_low_risk():
+def test_verdict_agent_low_is_just_clean():
     comment = build_comment(
         _clean(),
-        agent=_assessment(verdict_level="low", verdict="small, focused; claim matches the diff"),
+        agent=_assessment(verdict_level="low", verdict="ignored for low"),
     )
-    assert "🟢 **Looks low-risk**" in comment
-    assert "claim matches the diff" in comment
+    assert "✅ **Clean**" in comment
+    assert "ignored for low" not in comment  # low → no verbose headline text
 
 
 def test_label_escalates_on_agent_intent_mismatch():

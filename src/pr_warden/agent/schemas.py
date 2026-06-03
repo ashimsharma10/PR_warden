@@ -81,21 +81,21 @@ class DoneInput(ToolInput):
     """
 
     verdict_level: Literal["high", "attention", "minor", "low", "inconclusive"] = Field(
-        description="Your overall read, picked honestly: 'high' (a real problem — "
-        "wrong, unsafe, or claim≠diff), 'attention' (worth a careful look), 'minor' "
-        "(small nits only), 'low' (looks low-risk), 'inconclusive' (you couldn't "
-        "tell). This sets the headline glyph; raise it freely, don't undersell risk."
+        description="Your overall read: 'high' (a real problem — wrong, unsafe, or "
+        "claim≠diff), 'attention' (worth a careful look), 'minor' (small nits only), "
+        "'low' (clean, no concerns at all), 'inconclusive' (you couldn't tell). "
+        "Pick 'low' when the PR is fine — the app renders it as ✅ Clean with nothing "
+        "else. Don't undersell risk."
     )
     verdict: str = Field(
-        description="One line: the headline read in your own words — the single "
-        "thing a 30-second maintainer must know and why it matters. Grounded in what "
-        "you read; no glyph, no 'merge'/'approve'."
+        description="One short line: the headline in your own words. For 'low' this "
+        "is ignored (the app just says ✅ Clean). For all other levels: the single "
+        "thing a maintainer must know. No glyph, no 'merge'/'approve'."
     )
     summary: str = Field(
-        description="1-2 sentences MAX. What the PR does + the single biggest "
-        "concern (if any). NO enumerated findings, NO numbered list, NO details — "
-        "those belong in `attention`. If the verdict already says it, don't repeat "
-        "it here. A maintainer should read this in 5 seconds."
+        description="ONE sentence. What the PR does — nothing else. No findings, "
+        "no concerns (those go in `attention` and `verdict`). Example: 'Adds a "
+        "centralized auth layer routing API keys through AuthManager.' That's it."
     )
     files_touched: list[str] = Field(
         default_factory=list,

@@ -80,10 +80,9 @@ Call `done` exactly once, with:
 - `verdict`: one line, your headline read — the single thing a 30-second
   maintainer must know and why it matters. Your own words, grounded in what you
   read; no glyph, and never tell them to merge.
-- `summary`: 1–2 sentences MAX. What the PR does + the single biggest concern
-  (if any). No enumerated findings, no numbered list, no detail — those belong
-  in `attention`. If the verdict already says it, don't repeat it. A maintainer
-  should read this in 5 seconds.
+- `summary`: ONE sentence. What the PR does — nothing else. No findings, no
+  concerns, no detail. Those go in `attention` and `verdict`. Example: "Adds a
+  centralized auth layer routing API keys through AuthManager." That's it.
 - `files_touched`: the high-level areas affected (e.g. ["auth", "tests"]).
 - `intent_matches_diff`: does the diff actually do what the PR/issue claims?
   Only answer false if you can point to the specific discrepancy.
