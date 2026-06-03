@@ -54,30 +54,52 @@ class Concern(IntEnum):
 DEFAULT_ADVISORY_THRESHOLD = 3
 
 
-def _advisory_escalates(failed: list[CheckResult], advisory_threshold: int | None) -> bool:
+@dataclass(frozen=True)
+class ChecksSummary:
+    """The deterministic checks reduced to the handful of facts every downstream
+    decision needs — computed once, then read by the verdict ladder, the facet
+    labels, and the needs-attention test. Without it, each of those re-derives
+    "what failed and how badly" inline and they can quietly drift apart.
+    """
+
+    failed: tuple[CheckResult, ...]
+    failed_names: frozenset[str]
+    high_fail: tuple[CheckResult, ...]       # severity >= HIGH
+    attention_plus: tuple[CheckResult, ...]  # severity >= ATTENTION_THRESHOLD
+    advisory_count: int                      # failures below ATTENTION_THRESHOLD
+
+    @classmethod
+    def from_results(cls, results: list[CheckResult]) -> "ChecksSummary":
+        failed = tuple(r for r in results if not r.passed)
+        return cls(
+            failed=failed,
+            failed_names=frozenset(r.name for r in failed),
+            high_fail=tuple(r for r in failed if r.severity >= Severity.HIGH),
+            attention_plus=tuple(r for r in failed if r.severity >= ATTENTION_THRESHOLD),
+            advisory_count=sum(1 for r in failed if r.severity < ATTENTION_THRESHOLD),
+        )
+
+
+def _advisory_escalates(advisory_count: int, advisory_threshold: int | None) -> bool:
     """True when enough advisory (sub-threshold) failures piled up to escalate.
 
     `advisory_threshold` None or <= 0 disables the rule.
     """
     if not advisory_threshold or advisory_threshold <= 0:
         return False
-    advisories = sum(1 for r in failed if r.severity < ATTENTION_THRESHOLD)
-    return advisories >= advisory_threshold
+    return advisory_count >= advisory_threshold
 
 
-def _needs_attention(
-    results: list[CheckResult], advisory_threshold: int | None
-) -> bool:
+def _needs_attention(summary: ChecksSummary, advisory_threshold: int | None) -> bool:
     """The single source of truth for the label decision.
 
     needs-attention when either a check at/above the attention threshold failed,
     OR enough advisory checks failed together to escalate. verdict_level and the
     comment banner both route through here so they can never disagree.
     """
-    failed = [r for r in results if not r.passed]
-    if any(r.severity >= ATTENTION_THRESHOLD for r in failed):
+    if summary.attention_plus:
         return True
-    return _advisory_escalates(failed, advisory_threshold)
+    return _advisory_escalates(summary.advisory_count, advisory_threshold)
 
 
 @dataclass(frozen=True)
@@ -275,9 +297,8 @@ def _concern(
 
     It is a triage read, never a ruling — it never tells the maintainer to merge.
     """
-    failed = [r for r in results if not r.passed]
-    high_fail = [r for r in failed if r.severity >= Severity.HIGH]
-    mix = _severity_mix(failed)
+    summary = ChecksSummary.from_results(results)
+    mix = _severity_mix(summary.failed)
     # Only trust agent fields from a run that actually finished; a force-finalized
     # fallback carries default-clean values that must never read as a real verdict.
     agent_ok = agent is not None and agent_complete
@@ -287,8 +308,8 @@ def _concern(
         return f"{s} · {tail}" if tail else s
 
     # ── 🔴 hard concerns ──────────────────────────────────────────────────────
-    if high_fail:
-        c = max(high_fail, key=lambda r: r.severity)
+    if summary.high_fail:
+        c = max(summary.high_fail, key=lambda r: r.severity)
         return Concern.HIGH, line("🔴", "High concern", f"{_check_name(c)}: {c.reason}", tail=mix)
     if agent_ok and not agent.intent_matches_diff:
         reason = agent.intent_mismatch_reason or "no reason given"
@@ -308,13 +329,12 @@ def _concern(
             "🟠", "Worth a look",
             f"start at {_linkify_location(top.location, link_ctx)} — {top.why}", tail=mix,
         )
-    if _needs_attention(results, advisory_threshold):
-        medplus = [r for r in failed if r.severity >= ATTENTION_THRESHOLD]
-        if medplus:
-            c = max(medplus, key=lambda r: r.severity)
+    if _needs_attention(summary, advisory_threshold):
+        if summary.attention_plus:
+            c = max(summary.attention_plus, key=lambda r: r.severity)
             lead = f"{_check_name(c)}: {c.reason}"
         else:  # escalated purely on a pile-up of advisory nits
-            lead = f"{len(failed)} advisory checks piled up (≥{advisory_threshold} escalates)"
+            lead = f"{len(summary.failed)} advisory checks piled up (≥{advisory_threshold} escalates)"
         return Concern.ATTENTION, line("🟠", "Worth a look", lead, tail=mix)
 
     # ── ⚠️ inconclusive (downgrades only a would-be 🟡/🟢; never escalates) ────
@@ -334,8 +354,8 @@ def _concern(
         )
 
     # ── 🟡 advisory-only flags ────────────────────────────────────────────────
-    if failed:
-        n = len(failed)
+    if summary.failed:
+        n = len(summary.failed)
         return Concern.INFO, line(
             "🟡", "Minor flags", f"{n} advisory {'check' if n == 1 else 'checks'}, nothing blocking"
         )
@@ -400,14 +420,14 @@ def pick_facet_labels(
     `ai-authored` and nothing else. The intent-mismatch facet only fires when the
     agent actually finished (a force-finalized run is not trusted).
     """
-    failed = {r.name for r in results if not r.passed}
+    summary = ChecksSummary.from_results(results)
     labels: list[str] = []
 
-    if any(not r.passed and r.severity >= Severity.HIGH for r in results):
+    if summary.high_fail:
         labels.append(LABEL_BLOCKER)
-    if failed & _SECURITY_CHECKS:
+    if summary.failed_names & _SECURITY_CHECKS:
         labels.append(LABEL_SECURITY)
-    if failed & _AI_CHECKS:
+    if summary.failed_names & _AI_CHECKS:
         labels.append(LABEL_AI_AUTHORED)
     if agent is not None and agent_complete and not agent.intent_matches_diff:
         labels.append(LABEL_INTENT_MISMATCH)

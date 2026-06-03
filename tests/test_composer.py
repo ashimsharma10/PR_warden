@@ -9,6 +9,7 @@ from pr_warden.composer import (
     LABEL_NEEDS_ATTENTION,
     LABEL_SECURITY,
     MANAGED_LABELS,
+    ChecksSummary,
     Concern,
     build_comment,
     format_agent_assessment,
@@ -390,6 +391,33 @@ def test_verdict_never_recommends_merge():
         assert "merge" not in comment
         assert "approve" not in comment
         assert "lgtm" not in comment
+
+
+# ── ChecksSummary (the one derivation the verdict/labels read from) ───────────
+
+
+def test_checks_summary_slices_failures_by_severity_and_kind():
+    results = [
+        CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
+        CheckResult("no_tests", False, "no tests", severity=Severity.MEDIUM),
+        CheckResult("ai_branch", False, "claude- branch", severity=Severity.LOW),
+        CheckResult("title_quality", True, "", severity=Severity.MEDIUM),  # passed
+    ]
+    s = ChecksSummary.from_results(results)
+
+    assert s.failed_names == {"secret_leak", "no_tests", "ai_branch"}
+    assert {r.name for r in s.high_fail} == {"secret_leak"}
+    assert {r.name for r in s.attention_plus} == {"secret_leak", "no_tests"}
+    assert s.advisory_count == 1  # only the LOW failure
+
+
+def test_checks_summary_all_pass_is_empty():
+    s = ChecksSummary.from_results([CheckResult("a", True, ""), CheckResult("b", True, "")])
+    assert s.failed == ()
+    assert s.failed_names == frozenset()
+    assert s.high_fail == ()
+    assert s.attention_plus == ()
+    assert s.advisory_count == 0
 
 
 # ── Severity tiering ──────────────────────────────────────────────────────────
