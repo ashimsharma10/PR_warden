@@ -59,7 +59,9 @@ class WebhookEvent(Base):
     __tablename__ = "webhook_event"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    delivery_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Unique: GitHub redelivers events (at-least-once), so the delivery id is the
+    # dedup key — a repeat insert raises IntegrityError and the redelivery is dropped.
+    delivery_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     action: Mapped[str | None] = mapped_column(String(50), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)

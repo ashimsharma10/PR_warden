@@ -108,6 +108,18 @@ async def test_recover_pending_events_redispatches(db, monkeypatch):
     assert processed == [eid]
 
 
+async def test_duplicate_delivery_is_dropped(db):
+    # GitHub redelivers the same event (same X-GitHub-Delivery) → record once.
+    first = await main._record_event("dup", "pull_request", "opened", _pr_payload(), "tr-a")
+    second = await main._record_event("dup", "pull_request", "opened", _pr_payload(), "tr-b")
+    assert first is not None
+    assert second is None  # redelivery dropped
+
+    async with db() as s:
+        rows = (await s.scalars(select(WebhookEvent).where(WebhookEvent.delivery_id == "dup"))).all()
+    assert len(rows) == 1
+
+
 async def test_recover_skips_done_events(db, monkeypatch):
     eid = await main._record_event("d5", "pull_request", "opened", _pr_payload(), "tr5")
     async with db() as s:

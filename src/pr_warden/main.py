@@ -6,6 +6,7 @@ from datetime import datetime, time, timezone
 import structlog
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import pr_warden.log as pr_warden_log
@@ -94,19 +95,31 @@ async def webhook(
             event_id = await _record_event(
                 x_github_delivery, "pull_request", event.action, data, trace_id
             )
-            background_tasks.add_task(_process_event, event_id)
+            if event_id is None:
+                log.info("webhook.duplicate_delivery")  # redelivery — already handled
+            else:
+                background_tasks.add_task(_process_event, event_id)
 
     return {"ok": True}
 
 
 async def _record_event(
     delivery_id: str | None, event_type: str, action: str, payload: dict, trace_id: str
-) -> int:
+) -> int | None:
     """Persist an incoming actionable event as a `pending` WebhookEvent and return
-    its id. Committed synchronously so the work outlives this process."""
+    its id — or None if this delivery was already recorded (a GitHub redelivery).
+
+    Committed synchronously so the work outlives this process. Dedup is enforced
+    by the unique `delivery_id`: the pre-check is the common path, the
+    IntegrityError catch closes the race between two concurrent redeliveries."""
+    key = delivery_id or trace_id  # GitHub always sets the delivery header
     async with async_session_factory() as session:
+        if await session.scalar(
+            select(WebhookEvent.id).where(WebhookEvent.delivery_id == key)
+        ):
+            return None
         row = WebhookEvent(
-            delivery_id=delivery_id or trace_id,  # delivery header is always set by GitHub
+            delivery_id=key,
             event_type=event_type,
             action=action,
             payload=payload,
@@ -114,7 +127,11 @@ async def _record_event(
             status="pending",
         )
         session.add(row)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            return None
         return row.id
 
 
