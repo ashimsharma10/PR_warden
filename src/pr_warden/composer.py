@@ -1,5 +1,6 @@
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from urllib.parse import quote
 
@@ -85,20 +86,51 @@ class LinkContext:
     """What the renderer needs to turn a cited `path:line` into a GitHub link:
     the repo, the head commit, and the set of real paths so we only ever link to
     files that exist.
+
+    `changed_paths` (a subset of `known_paths`) and `pr_number` let a cited
+    location in a *changed* file link into the PR diff — straight to the change —
+    rather than the whole file blob. Files that exist but weren't touched
+    (repo-tree only) have no diff, so they still link to the blob at `sha`.
     """
 
     repo: str
     sha: str
     known_paths: frozenset[str]
+    changed_paths: frozenset[str] = field(default_factory=frozenset)
+    pr_number: int | None = None
 
 
 _LOCATION_RE = re.compile(r"^(?P<path>[\w./-]+):(?P<line>\d+)(?:-(?P<end>\d+))?$")
 
 
+def _diff_anchor(path: str, line: str | None) -> str:
+    """The fragment for a file (and optional line) inside GitHub's PR diff view.
+
+    GitHub anchors each file's diff by `diff-<sha256 of the path>`, and a line on
+    the new (right) side by suffixing `R<line>`. Landing on the start line is the
+    whole point of "where to focus", so a range collapses to its first line.
+    """
+    anchor = "diff-" + hashlib.sha256(path.encode("utf-8")).hexdigest()
+    return anchor + (f"R{line}" if line else "")
+
+
+def _location_url(link_ctx: LinkContext, path: str, line: str | None, end: str | None) -> str:
+    # Changed file → into the PR diff, so the maintainer lands on the change itself.
+    if path in link_ctx.changed_paths and link_ctx.pr_number is not None:
+        return (
+            f"https://github.com/{link_ctx.repo}/pull/{link_ctx.pr_number}"
+            f"/files#{_diff_anchor(path, line)}"
+        )
+    # Unchanged file that still exists → the blob at head, with the line range.
+    anchor = f"#L{line}" + (f"-L{end}" if end else "") if line else ""
+    return f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
+
+
 def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
-    """A cited location → a Markdown link to the line on GitHub, but only when it
-    resolves to a real file in the PR. Anything else stays plain `code` so a
-    guessed/broken link never reaches a maintainer. Adds zero visible length."""
+    """A cited location → a Markdown link on GitHub, but only when it resolves to a
+    real file in the PR. A changed file links to the PR diff (the change itself); an
+    unchanged-but-existing file links to the blob. Anything else stays plain `code`
+    so a guessed/broken link never reaches a maintainer. Adds zero visible length."""
     code = f"`{location}`"
     if link_ctx is None:
         return code
@@ -106,15 +138,13 @@ def _linkify_location(location: str, link_ctx: LinkContext | None) -> str:
     m = _LOCATION_RE.match(loc)
     if m:
         path, line, end = m.group("path"), m.group("line"), m.group("end")
-        anchor = f"#L{line}" + (f"-L{end}" if end else "")
     elif loc in link_ctx.known_paths:
-        path, anchor = loc, ""
+        path, line, end = loc, None, None
     else:
         return code
     if path not in link_ctx.known_paths:
         return code
-    url = f"https://github.com/{link_ctx.repo}/blob/{link_ctx.sha}/{quote(path, safe='/')}{anchor}"
-    return f"[{code}]({url})"
+    return f"[{code}]({_location_url(link_ctx, path, line, end)})"
 
 
 def _format_attention(items: list[AttentionItem], link_ctx: LinkContext | None) -> list[str]:

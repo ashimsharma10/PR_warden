@@ -233,6 +233,80 @@ def test_verdict_headline_location_is_linked():
     assert "blob/abc123/auth.py#L88)" in comment
 
 
+# ── Changed files link into the PR diff, not the blob ─────────────────────────
+
+
+def _diff_ctx(*changed, pr_number=42, tree=()):
+    """A link context where `changed` files are part of the PR diff and `tree`
+    files exist but weren't touched."""
+    from pr_warden.composer import LinkContext
+    return LinkContext(
+        repo="o/r",
+        sha="abc123",
+        known_paths=frozenset(changed) | frozenset(tree),
+        changed_paths=frozenset(changed),
+        pr_number=pr_number,
+    )
+
+
+def _diff_anchor(path: str) -> str:
+    import hashlib
+    return "diff-" + hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
+def test_changed_file_links_to_pr_diff_line():
+    # A cited line in a changed file lands the maintainer on the change in the
+    # PR's "Files changed" view, not the whole file.
+    out = format_agent_assessment(
+        _assessment(attention=[_item("payments.py:42", "high", "high")]),
+        _diff_ctx("payments.py"),
+    )
+    anchor = _diff_anchor("payments.py")
+    assert f"https://github.com/o/r/pull/42/files#{anchor}R42)" in out
+    assert "/blob/" not in out
+
+
+def test_changed_file_range_collapses_to_start_line_in_diff():
+    out = format_agent_assessment(
+        _assessment(attention=[_item("payments.py:42-50", "high", "high")]),
+        _diff_ctx("payments.py"),
+    )
+    anchor = _diff_anchor("payments.py")
+    assert f"/pull/42/files#{anchor}R42)" in out  # start line; no R..-R.. range
+
+
+def test_changed_file_without_line_links_to_diff_file_section():
+    out = format_agent_assessment(
+        _assessment(attention=[_item("payments.py", "high", "high")]),
+        _diff_ctx("payments.py"),
+    )
+    anchor = _diff_anchor("payments.py")
+    assert f"/pull/42/files#{anchor})" in out  # file section, no R<line>
+
+
+def test_unchanged_repo_tree_file_still_links_to_blob():
+    # Exists in the repo but not in this PR's diff → blob link (no diff to show).
+    out = format_agent_assessment(
+        _assessment(attention=[_item("core.py:9", "high", "high")]),
+        _diff_ctx("payments.py", tree=("core.py",)),
+    )
+    assert "blob/abc123/core.py#L9)" in out
+    assert "/pull/42/files#diff-" not in out
+
+
+def test_diff_link_only_when_pr_number_present():
+    # changed_paths set but no pr_number → fall back to blob (can't build a diff URL).
+    from pr_warden.composer import LinkContext
+    ctx = LinkContext(
+        repo="o/r", sha="abc123",
+        known_paths=frozenset({"payments.py"}),
+        changed_paths=frozenset({"payments.py"}),
+        pr_number=None,
+    )
+    out = format_agent_assessment(_assessment(attention=[_item("payments.py:42", "high", "high")]), ctx)
+    assert "blob/abc123/payments.py#L42)" in out
+
+
 # ── Facet labels (the only labels applied) ────────────────────────────────────
 
 
