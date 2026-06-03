@@ -22,12 +22,13 @@ from pr_warden.composer import (
     pick_facet_labels,
     verdict_level,
 )
+from pr_warden.commands import parse_command
 from pr_warden.config import settings
 from pr_warden.db import async_session_factory, engine, get_session
 from pr_warden.github import auth, client
-from pr_warden.github.schemas import PullRequestEvent
+from pr_warden.github.schemas import IssueCommentEvent, PullRequestEvent
 from pr_warden.github.webhooks import verify_signature
-from pr_warden.models import PRCheck, Repo
+from pr_warden.models import PRCheck, PRMute, Repo
 from pr_warden.repo_config import CONFIG_PATH, DEFAULT_CONFIG, RepoConfig, parse_config
 
 log = structlog.get_logger()
@@ -84,6 +85,16 @@ async def webhook(
         event = PullRequestEvent.model_validate(data)
         if event.action in _REVIEWABLE_ACTIONS and not event.pull_request.draft:
             background_tasks.add_task(_handle_pr_event, event, trace_id)
+
+    elif x_github_event == "issue_comment":
+        data = json.loads(body)
+        comment_event = IssueCommentEvent.model_validate(data)
+        # Only `created` comments on a PR (not a plain issue) that parse as a
+        # known `/warden …` command reach the handler; everything else is ignored.
+        if comment_event.action == "created" and comment_event.issue.pull_request is not None:
+            command = parse_command(comment_event.comment.body)
+            if command is not None:
+                background_tasks.add_task(_handle_command, comment_event, command, trace_id)
 
     return {"ok": True}
 
@@ -212,6 +223,13 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         token = await auth.get_installation_token(event.installation.id)
         repo = event.repository.full_name
 
+        # Muted by `/warden mute` on this PR: skip everything (post, labels, and
+        # the paid agent) until `/warden unmute`. Checked first so a mute costs
+        # nothing. The existing comment, if any, is left untouched.
+        if await _is_muted(event.installation.id, event.number):
+            log.info("pr_event.skipped_muted")
+            return
+
         config = await _load_repo_config(token, repo)
         ctx = await _build_check_context(token, repo, event, config)
         results = run_checks(ctx)
@@ -336,6 +354,84 @@ async def _get_or_create_repo(
         session.add(repo)
         await session.flush()
     return repo
+
+
+async def _can_manage(token: str, repo: str, actor: str, pr_author: str) -> bool:
+    """Who may run `/warden …` on a PR: the PR's own author, or any collaborator
+    with write access (write/maintain/admin). A drive-by commenter cannot silence
+    the bot. The author check avoids an API call for the common case.
+    """
+    if actor == pr_author:
+        return True
+    perm = await client.get_user_permission(token, repo, actor)
+    return perm in {"admin", "maintain", "write"}
+
+
+async def _set_mute(
+    installation_id: int, repo: str, pr_number: int, muted: bool, actor: str
+) -> None:
+    """Upsert the per-PR mute switch."""
+    async with async_session_factory() as session:
+        repo_row = await _get_or_create_repo(session, installation_id, repo)
+        mute = await session.scalar(
+            select(PRMute)
+            .where(PRMute.repo_id == repo_row.id)
+            .where(PRMute.pr_number == pr_number)
+        )
+        if mute is None:
+            mute = PRMute(repo_id=repo_row.id, pr_number=pr_number)
+            session.add(mute)
+        mute.muted = muted
+        mute.muted_by = actor
+        await session.commit()
+
+
+async def _is_muted(installation_id: int, pr_number: int) -> bool:
+    """True if this PR is currently muted. False (don't skip) if the repo or mute
+    row doesn't exist yet — muting requires an explicit command first."""
+    async with async_session_factory() as session:
+        repo_row = await session.scalar(
+            select(Repo).where(Repo.installation_id == installation_id)
+        )
+        if repo_row is None:
+            return False
+        muted = await session.scalar(
+            select(PRMute.muted)
+            .where(PRMute.repo_id == repo_row.id)
+            .where(PRMute.pr_number == pr_number)
+        )
+        return bool(muted)
+
+
+async def _handle_command(event: IssueCommentEvent, command: str, trace_id: str) -> None:
+    """Apply a `/warden …` slash command. Authorization-gated; acknowledges with a
+    👍 reaction on the command comment rather than a reply (no new review comment).
+    """
+    structlog.contextvars.bind_contextvars(
+        trace_id=trace_id,
+        repo=event.repository.full_name,
+        pr=event.issue.number,
+    )
+    actor = event.comment.user.login
+    log.info("command.received", command=command, by=actor)
+
+    try:
+        token = await auth.get_installation_token(event.installation.id)
+        repo = event.repository.full_name
+
+        if not await _can_manage(token, repo, actor, event.issue.user.login):
+            log.info("command.unauthorized", actor=actor)
+            return
+
+        await _set_mute(
+            event.installation.id, repo, event.issue.number,
+            muted=(command == "mute"), actor=actor,
+        )
+        await client.add_reaction(token, repo, event.comment.id, "+1")
+        log.info("command.applied", command=command)
+
+    except Exception:
+        log.exception("command.failed")
 
 
 async def _require_stats_token(

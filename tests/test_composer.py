@@ -84,7 +84,7 @@ def test_comment_fallback_orders_high_severity_first():
 
 def test_comment_footer():
     comment = build_comment([CheckResult("a", True, "")])
-    assert "/prwarden recheck" in comment
+    assert "/warden mute" in comment
 
 
 def _link_ctx(*paths):
