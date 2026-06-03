@@ -92,10 +92,10 @@ class DoneInput(ToolInput):
         "you read; no glyph, no 'merge'/'approve'."
     )
     summary: str = Field(
-        description="A brief read for a busy maintainer — 1-3 sentences: what the "
-        "PR does and the single most important concern, grounded in the code (not a "
-        "restatement of the PR description). Do NOT enumerate every finding here — "
-        "the specific spots go in `attention`. No numbered audit; keep it short."
+        description="1-2 sentences MAX. What the PR does + the single biggest "
+        "concern (if any). NO enumerated findings, NO numbered list, NO details — "
+        "those belong in `attention`. If the verdict already says it, don't repeat "
+        "it here. A maintainer should read this in 5 seconds."
     )
     files_touched: list[str] = Field(
         default_factory=list,
