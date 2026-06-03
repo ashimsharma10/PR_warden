@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     agent_timeout_s: float = 90.0
 
     stats_bearer_token: str = ""
-    bot_owner_username: str = ""
 
     def agent_enabled_for(self, repo: str) -> bool:
         """True if the review agent is allowlisted for `repo` ("owner/name")."""
