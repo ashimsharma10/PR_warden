@@ -130,8 +130,9 @@ first, each with a one-line "why"), open questions, and a confidence score.
 ## Endpoints
 
 - `POST /webhook` — GitHub webhook receiver (HMAC signature verified)
-- `GET /stats` — totals, failures-by-check, and recent runs (optionally
-  bearer-token protected via `STATS_BEARER_TOKEN`)
+- `GET /stats` — totals, failures-by-check, and recent runs. Closed by default:
+  returns `403` unless `STATS_BEARER_TOKEN` is set (then requires
+  `Authorization: Bearer …`), or `STATS_PUBLIC=true` exposes it without auth
 
 ## Run it
 
@@ -162,7 +163,8 @@ Tests: `pytest -q`.
 | `AGENT_MODEL` / `AGENT_TIMEOUT_S` | Agent model and wall-clock cap | `claude-sonnet-4-6` / 90s |
 | `DAILY_COST_LIMIT_USD` | Daily agent spend ceiling | 5.00 |
 | `SEMGREP_CONFIGS` / `SEMGREP_EXCLUDE_RULES` | Override the security ruleset | curated defaults |
-| `STATS_BEARER_TOKEN` | Protect `/stats` | unset (open) |
+| `STATS_BEARER_TOKEN` | Bearer token for `/stats` | unset (`/stats` closed → 403) |
+| `STATS_PUBLIC` | Expose `/stats` with no auth | `false` |
 
 ## Design principles
 

@@ -441,8 +441,15 @@ async def _get_or_create_repo(
 async def _require_stats_token(
     authorization: str | None = Header(default=None),
 ) -> None:
-    if not settings.stats_bearer_token:
+    # Secure by default: /stats leaks repo names, PR numbers, and failure patterns,
+    # so it's closed unless a token is configured (or explicitly made public).
+    if settings.stats_public:
         return
+    if not settings.stats_bearer_token:
+        raise HTTPException(
+            status_code=403,
+            detail="stats disabled: set STATS_BEARER_TOKEN, or STATS_PUBLIC=true to expose it",
+        )
     if authorization != f"Bearer {settings.stats_bearer_token}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
