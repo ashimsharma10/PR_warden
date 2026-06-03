@@ -72,6 +72,8 @@ def _scripted_send(responses):
 
 
 _DONE_ARGS = {
+    "verdict_level": "attention",
+    "verdict": "Guards the charge, but the retry path has no test.",
     "summary": "Guards the charge behind an already_charged check.",
     "files_touched": ["payments"],
     "intent_matches_diff": True,

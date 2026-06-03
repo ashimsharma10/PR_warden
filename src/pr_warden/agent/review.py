@@ -21,6 +21,8 @@ def review_fallback(reason: str) -> DoneInput:
     real `done` (budget exhausted, model wouldn't finalize). Confidence 0.0 so
     the verdict reads inconclusive rather than a false pass."""
     return DoneInput(
+        verdict_level="inconclusive",
+        verdict="the agent stopped before completing its assessment",
         summary="The agent stopped before completing its assessment.",
         files_touched=[],
         intent_matches_diff=True,

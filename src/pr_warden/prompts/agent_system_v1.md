@@ -71,6 +71,15 @@ a valid result.
 
 Call `done` exactly once, with:
 
+- `verdict_level`: your overall read — `high` (a real problem: wrong, unsafe, or
+  the diff doesn't match the claim), `attention` (worth a careful look), `minor`
+  (small nits only), `low` (looks low-risk), or `inconclusive` (you couldn't
+  tell). Your call, informed by the checks you were given — pick it honestly and
+  don't undersell risk. (A leaked secret / critical-path touch is floored to high
+  by the app regardless.)
+- `verdict`: one line, your headline read — the single thing a 30-second
+  maintainer must know and why it matters. Your own words, grounded in what you
+  read; no glyph, and never tell them to merge.
 - `summary`: what the PR actually changes, grounded in the diff you read — not a
   restatement of the PR description. Scale the length to the change: one sentence
   for a small, focused PR; a short paragraph for a large or complex one, covering

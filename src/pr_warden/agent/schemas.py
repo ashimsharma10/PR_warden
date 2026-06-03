@@ -70,8 +70,26 @@ class AttentionItem(BaseModel):
 
 
 class DoneInput(ToolInput):
-    """The agent's final structured assessment — the `done` tool's arguments."""
+    """The agent's final structured assessment — the `done` tool's arguments.
 
+    This schema IS the report format: the model fills it, the app renders it. The
+    verdict headline comes from the model (`verdict_level` + `verdict`), not a
+    deterministic rule — the only exception is a hard HIGH-severity check (a leaked
+    secret / critical-path touch), which the app floors to 🔴 so the model can
+    never bury it.
+    """
+
+    verdict_level: Literal["high", "attention", "minor", "low", "inconclusive"] = Field(
+        description="Your overall read, picked honestly: 'high' (a real problem — "
+        "wrong, unsafe, or claim≠diff), 'attention' (worth a careful look), 'minor' "
+        "(small nits only), 'low' (looks low-risk), 'inconclusive' (you couldn't "
+        "tell). This sets the headline glyph; raise it freely, don't undersell risk."
+    )
+    verdict: str = Field(
+        description="One line: the headline read in your own words — the single "
+        "thing a 30-second maintainer must know and why it matters. Grounded in what "
+        "you read; no glyph, no 'merge'/'approve'."
+    )
     summary: str = Field(
         description="What the diff actually changes, grounded in the code you read "
         "— not a restatement of the PR description. Scale the length to the change: "
@@ -110,6 +128,12 @@ class DoneInput(ToolInput):
         description="0.0-1.0, honestly reflecting how much of this assessment is "
         "backed by evidence you read versus inference. Lower it when unsure.",
     )
+
+    @field_validator("verdict_level", mode="before")
+    @classmethod
+    def _normalize_level(cls, v: Any) -> Any:
+        # Accept "High"/" attention " without bouncing the whole call for a retry.
+        return v.lower().strip() if isinstance(v, str) else v
 
 
 class AgentResult(BaseModel, Generic[OutputT]):
