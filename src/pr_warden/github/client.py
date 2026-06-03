@@ -157,6 +157,34 @@ async def list_issue_comments(
     return comments
 
 
+async def get_user_permission(token: str, repo: str, username: str) -> str:
+    """The user's permission level on the repo: ``admin``/``maintain``/``write``/
+    ``read``/``none``. A 404 (not a collaborator) maps to ``none``.
+    """
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/collaborators/{username}/permission",
+        headers=_headers(token),
+    )
+    if r.status_code == 404:
+        return "none"
+    r.raise_for_status()
+    perm: str = r.json().get("permission", "none")
+    return perm
+
+
+async def add_reaction(token: str, repo: str, comment_id: int, content: str = "+1") -> None:
+    """React to an issue/PR comment — used to acknowledge a slash command without
+    posting a reply. Idempotent: GitHub returns 200 if the reaction already exists.
+    """
+    r = await _client.post(
+        f"{GH_API}/repos/{repo}/issues/comments/{comment_id}/reactions",
+        headers=_headers(token),
+        json={"content": content},
+    )
+    if r.status_code not in (200, 201):
+        r.raise_for_status()
+
+
 async def list_pr_commits(token: str, repo: str, pr_number: int) -> list[dict]:
     commits: list[dict] = []
     page = 1

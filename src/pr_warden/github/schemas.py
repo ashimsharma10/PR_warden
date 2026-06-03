@@ -45,3 +45,26 @@ class PullRequestEvent(BaseModel):
     repository: Repository
     sender: GitHubUser
     installation: Installation
+
+
+class IssueRef(BaseModel):
+    number: int
+    user: GitHubUser
+    # GitHub sends a `pull_request` object on the issue only when the issue is a
+    # PR. Its presence is how we tell a PR comment from a plain-issue comment.
+    pull_request: dict | None = None
+
+
+class IssueComment(BaseModel):
+    id: int
+    body: str
+    user: GitHubUser
+
+
+class IssueCommentEvent(BaseModel):
+    action: str
+    comment: IssueComment
+    issue: IssueRef
+    repository: Repository
+    sender: GitHubUser
+    installation: Installation

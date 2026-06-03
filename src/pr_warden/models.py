@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -42,3 +51,24 @@ class PRCheck(Base):
     )
 
     repo: Mapped["Repo"] = relationship(back_populates="checks")
+
+
+class PRMute(Base):
+    """Per-PR mute switch, toggled by the `/warden mute` / `/warden unmute`
+    commands. When `muted` is true, the review pipeline skips this PR entirely
+    (no post, no labels, no agent) until it's unmuted.
+    """
+
+    __tablename__ = "pr_mute"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "pr_number", name="uq_pr_mute_repo_pr"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repo.id"), nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    muted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    muted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

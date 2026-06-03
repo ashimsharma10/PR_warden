@@ -127,9 +127,24 @@ carries: a summary, files touched, whether the diff matches the stated intent
 (with a mismatch reason), a risk-ranked attention map (the 2–3 spots to look
 first, each with a one-line "why"), open questions, and a confidence score.
 
+## Slash commands
+
+Maintainers steer PRwarden by commenting on the PR. A command must be the first
+line of the comment; PRwarden acknowledges with a 👍 on the comment (no reply).
+
+| Command | Effect |
+| --- | --- |
+| `/warden mute` | Silence PRwarden on this PR — it skips the post, labels, and the (paid) agent on every later event. The existing comment is left as-is. |
+| `/warden unmute` | Resume reviews; PRwarden posts again on the next event. |
+
+Only the **PR author** or a **write-access collaborator** may run a command
+(checked against the repo's collaborator permission); anyone else is ignored.
+Requires the GitHub App to subscribe to the **Issue comment** event.
+
 ## Endpoints
 
-- `POST /webhook` — GitHub webhook receiver (HMAC signature verified)
+- `POST /webhook` — GitHub webhook receiver (HMAC signature verified); handles
+  `pull_request` (review) and `issue_comment` (slash commands)
 - `GET /stats` — totals, failures-by-check, and recent runs (optionally
   bearer-token protected via `STATS_BEARER_TOKEN`)
 

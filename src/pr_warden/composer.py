@@ -256,7 +256,7 @@ def build_comment(
     if failing:
         parts.append(failing)
 
-    parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
+    parts.append("\n\n---\n*Powered by PRwarden · `/warden mute` to silence on this PR*")
     return "\n".join(parts)
 
 
