@@ -6,10 +6,10 @@ from urllib.parse import quote
 from pr_warden.agent.schemas import AttentionItem, DoneInput
 from pr_warden.checks.registry import ATTENTION_THRESHOLD, CheckResult, Severity
 
-# Retired: PRwarden no longer applies a generic status label. The verdict
-# headline in the comment carries the overall read; specific facet labels (below)
-# carry queue-level filtering. These two are kept only so the applier can strip
-# them from PRs labelled by an earlier version, and as an analytics value.
+# Retired: PRwarden no longer applies a generic status label, nor derives one.
+# The verdict headline in the comment carries the overall read; specific facet
+# labels (below) carry queue-level filtering. These two names are kept only so
+# the applier can strip them from PRs labelled by an earlier version.
 LABEL_CLEAN = "prwarden:clean"
 LABEL_NEEDS_ATTENTION = "prwarden:needs-attention"
 
@@ -71,7 +71,7 @@ def _needs_attention(
     """The single source of truth for the label decision.
 
     needs-attention when either a check at/above the attention threshold failed,
-    OR enough advisory checks failed together to escalate. pick_label and the
+    OR enough advisory checks failed together to escalate. verdict_level and the
     comment banner both route through here so they can never disagree.
     """
     failed = [r for r in results if not r.passed]
@@ -365,28 +365,27 @@ def build_verdict(
     )[1]
 
 
-def pick_label(
+def verdict_level(
     results: list[CheckResult],
     agent: DoneInput | None = None,
     *,
     agent_complete: bool = True,
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
-) -> str:
-    """The status label, driven by the same concern level as the verdict headline.
+) -> Concern:
+    """The verdict's concern level — the same ladder that drives the headline.
 
-    needs-attention iff `Concern >= ATTENTION`: a MEDIUM+ check failed, advisories
-    piled up, OR — when the agent finished — it flagged the diff as not matching
-    the stated intent or surfaced a high-priority (risk × centrality) spot. So the
-    label and the headline can never disagree.
+    Recorded per run for `/stats` analytics. PRwarden no longer turns this into a
+    status *label* (that's retired — see RETIRED_LABELS); the verdict headline
+    carries the overall read and facet labels carry queue filtering. Exposing the
+    level itself keeps analytics richer than the old binary clean/needs-attention:
+    `Concern >= ATTENTION` is the boundary the old `needs-attention` label marked.
 
-    A single advisory (LOW) failure, or an inconclusive/low-confidence agent, keeps
-    the PR `clean` — a nit or a timed-out agent must not raise the same flag as a
-    leaked secret. With `agent=None` this reduces to the original checks-only rule.
+    With `agent=None` this reduces to the original checks-only rule.
     """
     level, _ = _concern(
         results, agent, agent_complete=agent_complete, advisory_threshold=advisory_threshold
     )
-    return LABEL_NEEDS_ATTENTION if level >= Concern.ATTENTION else LABEL_CLEAN
+    return level
 
 
 def pick_facet_labels(

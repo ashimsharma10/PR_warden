@@ -42,17 +42,3 @@ class PRCheck(Base):
     )
 
     repo: Mapped["Repo"] = relationship(back_populates="checks")
-    overrides: Mapped[list["Override"]] = relationship(back_populates="pr_check")
-
-
-class Override(Base):
-    __tablename__ = "override"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    pr_check_id: Mapped[int] = mapped_column(ForeignKey("pr_check.id"), nullable=False)
-    action_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    pr_check: Mapped["PRCheck"] = relationship(back_populates="overrides")

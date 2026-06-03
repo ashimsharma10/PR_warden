@@ -9,11 +9,21 @@ from pr_warden.composer import (
     LABEL_NEEDS_ATTENTION,
     LABEL_SECURITY,
     MANAGED_LABELS,
+    Concern,
     build_comment,
     format_agent_assessment,
     pick_facet_labels,
-    pick_label,
+    verdict_level,
 )
+
+
+def _label(*args, **kwargs) -> str:
+    """The retired binary status label, derived from the verdict level for these
+    boundary tests. PRwarden stores the level (`verdict_level`) now and never
+    applies a status label, but `Concern >= ATTENTION` is still the exact boundary
+    the old `needs-attention` label marked — so these tests assert against it."""
+    level = verdict_level(*args, **kwargs)
+    return LABEL_NEEDS_ATTENTION if level >= Concern.ATTENTION else LABEL_CLEAN
 
 
 def _assessment(**kwargs) -> DoneInput:
@@ -170,19 +180,19 @@ def test_attention_item_normalizes_case():
     assert it.priority == 3
 
 
-def test_pick_label_all_pass():
+def test_verdict_level_all_pass():
     results = [CheckResult("a", True, ""), CheckResult("b", True, "")]
-    assert pick_label(results) == LABEL_CLEAN
+    assert _label(results) == LABEL_CLEAN
 
 
-def test_pick_label_any_fail():
+def test_verdict_level_any_fail():
     results = [CheckResult("a", True, ""), CheckResult("b", False, "reason")]
-    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+    assert _label(results) == LABEL_NEEDS_ATTENTION
 
 
-def test_pick_label_all_fail():
+def test_verdict_level_all_fail():
     results = [CheckResult("a", False, "x"), CheckResult("b", False, "y")]
-    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+    assert _label(results) == LABEL_NEEDS_ATTENTION
 
 
 # ── Clickable locations (granular) ────────────────────────────────────────────
@@ -337,27 +347,27 @@ def test_verdict_clean_with_confident_agent_is_low_risk():
 
 def test_label_escalates_on_agent_intent_mismatch():
     # Clean checks, but the agent says claim ≠ diff → status flips to needs-attention.
-    assert pick_label(_clean(), _assessment(intent_matches_diff=False)) == LABEL_NEEDS_ATTENTION
+    assert _label(_clean(), _assessment(intent_matches_diff=False)) == LABEL_NEEDS_ATTENTION
 
 
 def test_label_escalates_on_high_attention_spot():
     agent = _assessment(attention=[_item("core.py:9", "high", "high")])  # priority 9
-    assert pick_label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+    assert _label(_clean(), agent) == LABEL_NEEDS_ATTENTION
 
 
 def test_label_incomplete_agent_does_not_escalate():
     # An agent that didn't finish must not flip the primary status filter.
-    assert pick_label(_clean(), _assessment(attention=[]), agent_complete=False) == LABEL_CLEAN
+    assert _label(_clean(), _assessment(attention=[]), agent_complete=False) == LABEL_CLEAN
 
 
 def test_label_low_confidence_does_not_escalate():
-    assert pick_label(_clean(), _assessment(attention=[], confidence=0.3)) == LABEL_CLEAN
+    assert _label(_clean(), _assessment(attention=[], confidence=0.3)) == LABEL_CLEAN
 
 
 def test_label_no_agent_reduces_to_checks_only():
     # Backward compatible: without an agent, the rule is exactly the old one.
-    assert pick_label(_clean()) == LABEL_CLEAN
-    assert pick_label([CheckResult("no_tests", False, "x", severity=Severity.MEDIUM)]) == LABEL_NEEDS_ATTENTION
+    assert _label(_clean()) == LABEL_CLEAN
+    assert _label([CheckResult("no_tests", False, "x", severity=Severity.MEDIUM)]) == LABEL_NEEDS_ATTENTION
 
 
 def test_label_and_verdict_never_disagree():
@@ -366,7 +376,7 @@ def test_label_and_verdict_never_disagree():
     agent = _assessment(intent_matches_diff=False)
     comment = build_comment(_clean(), agent=agent)
     assert "High concern" in comment
-    assert pick_label(_clean(), agent) == LABEL_NEEDS_ATTENTION
+    assert _label(_clean(), agent) == LABEL_NEEDS_ATTENTION
 
 
 def test_verdict_never_recommends_merge():
@@ -385,26 +395,26 @@ def test_verdict_never_recommends_merge():
 # ── Severity tiering ──────────────────────────────────────────────────────────
 
 
-def test_pick_label_low_only_failure_stays_clean():
+def test_verdict_level_low_only_failure_stays_clean():
     # A hygiene nit alone must not flip the PR to needs-attention.
     results = [
         CheckResult("branch_naming", False, "bad branch", severity=Severity.LOW),
         CheckResult("secret_leak", True, "", severity=Severity.HIGH),
     ]
-    assert pick_label(results) == LABEL_CLEAN
+    assert _label(results) == LABEL_CLEAN
 
 
-def test_pick_label_medium_failure_needs_attention():
+def test_verdict_level_medium_failure_needs_attention():
     results = [CheckResult("no_tests", False, "no tests", severity=Severity.MEDIUM)]
-    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+    assert _label(results) == LABEL_NEEDS_ATTENTION
 
 
-def test_pick_label_high_failure_needs_attention():
+def test_verdict_level_high_failure_needs_attention():
     results = [
         CheckResult("branch_naming", False, "nit", severity=Severity.LOW),
         CheckResult("secret_leak", False, "AWS key", severity=Severity.HIGH),
     ]
-    assert pick_label(results) == LABEL_NEEDS_ATTENTION
+    assert _label(results) == LABEL_NEEDS_ATTENTION
 
 
 def test_verdict_advisory_only_is_minor_flags():
@@ -428,23 +438,23 @@ def _lows(n: int) -> list:
 
 def test_advisory_pile_escalates_at_default_threshold():
     # 3 advisory failures (the slop signature) → needs-attention by default.
-    assert pick_label(_lows(3)) == LABEL_NEEDS_ATTENTION
+    assert _label(_lows(3)) == LABEL_NEEDS_ATTENTION
 
 
 def test_advisory_below_threshold_stays_clean():
-    assert pick_label(_lows(2)) == LABEL_CLEAN
+    assert _label(_lows(2)) == LABEL_CLEAN
 
 
 def test_advisory_threshold_is_configurable():
     # Maintainer tightens it: 2 advisories now escalates.
-    assert pick_label(_lows(2), advisory_threshold=2) == LABEL_NEEDS_ATTENTION
+    assert _label(_lows(2), advisory_threshold=2) == LABEL_NEEDS_ATTENTION
     # ...or loosens it: 4 needed.
-    assert pick_label(_lows(3), advisory_threshold=4) == LABEL_CLEAN
+    assert _label(_lows(3), advisory_threshold=4) == LABEL_CLEAN
 
 
 def test_advisory_escalation_can_be_disabled():
     # threshold None disables the rule entirely — any number of advisories is clean.
-    assert pick_label(_lows(10), advisory_threshold=None) == LABEL_CLEAN
+    assert _label(_lows(10), advisory_threshold=None) == LABEL_CLEAN
 
 
 def test_verdict_explains_advisory_escalation():
