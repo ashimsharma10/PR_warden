@@ -262,6 +262,7 @@ def build_comment(
     advisory_threshold: int | None = DEFAULT_ADVISORY_THRESHOLD,
     changes: str | None = None,
     link_ctx: LinkContext | None = None,
+    ci_status: tuple[str, list[str]] | None = None,
 ) -> str:
     """One consolidated, deliberately short review.
 
@@ -275,6 +276,19 @@ def build_comment(
         advisory_threshold=advisory_threshold, link_ctx=link_ctx,
     )
     parts = [verdict]
+
+    # CI banner — shown only when CI is red so the maintainer knows the build
+    # state at the time of review. The agent still ran with CI as context.
+    if ci_status is not None:
+        ci_state, ci_failed = ci_status
+        if ci_state in ("failure", "error"):
+            names = ", ".join(ci_failed[:5]) if ci_failed else "unknown checks"
+            overflow = f" (+{len(ci_failed) - 5} more)" if len(ci_failed) > 5 else ""
+            parts.append(
+                f"\n⚠️ **CI is failing** ({names}{overflow}) — "
+                "review reflects the current diff."
+            )
+
     if changes:
         parts.append(f"\n{changes}")
 

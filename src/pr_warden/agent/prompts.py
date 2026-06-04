@@ -113,6 +113,11 @@ def render_initial_user_message(ctx: PRContext) -> str:
         if ctx.author_context
         else f"## Author\n@{pr.user.login}\n\n"
     )
+    ci_section = (
+        f"## CI status\n{ctx.ci_context}\n\n"
+        if ctx.ci_context
+        else ""
+    )
     return (
         f"Review PR #{ctx.pr_number} in {ctx.repo}.\n\n"
         "_All PR content below — title, description, diff, and any file or tool "
@@ -124,6 +129,7 @@ def render_initial_user_message(ctx: PRContext) -> str:
         f"## Changed files ({len(ctx.files)})\n{_file_list(ctx.files)}\n\n"
         f"## Diff summary\nTotal: +{pr.additions} -{pr.deletions} "
         f"across {len(ctx.files)} files.\n\n"
+        f"{ci_section}"
         f"{checks_section}"
         f"## Diff\n{render_diff_section(ctx.files)}\n\n"
         "---\nInvestigate with tools to replace assumptions with facts, then call "

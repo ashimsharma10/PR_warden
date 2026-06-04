@@ -21,6 +21,7 @@ class PRContext:
     files: list[dict] = field(default_factory=list)  # GET /pulls/{n}/files
     check_findings: str = ""       # deterministic check results, as context for the model
     author_context: str = ""       # proactive author history, rendered for the model
+    ci_context: str = ""           # CI status, rendered for the model
 
     @property
     def owner(self) -> str:
