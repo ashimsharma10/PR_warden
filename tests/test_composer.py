@@ -363,6 +363,13 @@ def test_facets_ai_branch_sets_provenance():
     assert pick_facet_labels(results) == [LABEL_AI_AUTHORED]
 
 
+def test_facets_intent_scope_failure_sets_intent_mismatch():
+    # The deterministic intent_scope check drives the same facet as the agent's
+    # intent_matches_diff read — no agent needed.
+    results = [CheckResult("intent_scope", False, "issue #1 about auth, diff in billing")]
+    assert LABEL_INTENT_MISMATCH in pick_facet_labels(results)
+
+
 def test_facets_intent_mismatch_only_from_finished_agent():
     clean = [CheckResult("title_quality", True, "")]
     assert LABEL_INTENT_MISMATCH not in pick_facet_labels(clean, None)

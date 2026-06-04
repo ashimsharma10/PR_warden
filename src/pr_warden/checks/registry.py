@@ -48,6 +48,10 @@ class CheckContext:
     config: RepoConfig = field(default_factory=lambda: DEFAULT_CONFIG)
     repo_tree: list[str] = field(default_factory=list)
     codeowners_raw: str | None = None
+    # Issues referenced by a closing keyword in the PR body (Closes/Fixes #N),
+    # each resolved to {"number", "title", "body"}. Empty when none linked or the
+    # fetch failed — the intent_scope check treats "no data" as a pass.
+    linked_issues: list[dict] = field(default_factory=list)
     # None  → gitleaks binary not available, scan was skipped
     # []    → gitleaks ran, no secrets found
     # [...] → gitleaks ran, findings present

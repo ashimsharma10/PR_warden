@@ -86,6 +86,32 @@ class CriticalPathConfig(CheckToggle):
     globs: list[str] = []
 
 
+class IntentScopeConfig(CheckToggle):
+    """Deterministic intent/scope coverage against the linked issue.
+
+    When a PR links an issue via a closing keyword (``Closes #123``) and that
+    issue names a module that actually exists in this repo, but the diff touches
+    none of it, flag it — the classic "issue says auth, diff touches billing"
+    scope drift. No LLM, no dependency graph: just a real directory name the
+    issue names that the diff never goes near. Tuned to almost never false-fire.
+
+    - ``require_linked_issue``: when true, a PR with no linked issue is itself
+      flagged (pairs with a branch-protection rule that mandates one).
+    - ``ignore_modules``: directory names too generic to be a meaningful signal
+      (matched case-insensitively).
+    - ``min_module_len``: shortest directory name considered distinctive enough
+      to treat as a module reference.
+    """
+
+    require_linked_issue: bool = False
+    ignore_modules: list[str] = [
+        "src", "lib", "app", "test", "tests", "docs", "doc", "core", "common",
+        "util", "utils", "pkg", "internal", "scripts", "config", "include",
+        "main", "api", "www", "public", "static", "assets", "build", "dist",
+    ]
+    min_module_len: int = 3
+
+
 class CodeownersConfig(CheckToggle):
     require_review: bool = True
 
@@ -116,6 +142,7 @@ class ChecksConfig(BaseModel):
     dependency_only_churn: CheckToggle = CheckToggle()
     shared_code: SharedCodeConfig = SharedCodeConfig()
     critical_path: CriticalPathConfig = CriticalPathConfig()
+    intent_scope: IntentScopeConfig = IntentScopeConfig()
     codeowners: CodeownersConfig = CodeownersConfig()
     secret_leak: SecretLeakConfig = SecretLeakConfig()
 

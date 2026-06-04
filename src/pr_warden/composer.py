@@ -33,6 +33,9 @@ MANAGED_LABELS = FACET_LABELS | RETIRED_LABELS
 # Which failed checks drive the kind/provenance facets. Severity drives `blocker`.
 _SECURITY_CHECKS = {"secret_leak", "critical_path"}
 _AI_CHECKS = {"ai_branch", "ai_commit_footer"}
+# The deterministic counterpart to the agent's intent_matches_diff read: a linked
+# issue whose named module the diff never touches. Drives the same facet label.
+_INTENT_CHECKS = {"intent_scope"}
 
 
 class Concern(IntEnum):
@@ -542,7 +545,7 @@ def pick_facet_labels(
         labels.append(LABEL_SECURITY)
     if failed & _AI_CHECKS:
         labels.append(LABEL_AI_AUTHORED)
-    if agent_ok and not agent.intent_matches_diff:
+    if (failed & _INTENT_CHECKS) or (agent_ok and not agent.intent_matches_diff):
         labels.append(LABEL_INTENT_MISMATCH)
 
     return labels
