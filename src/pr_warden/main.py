@@ -301,9 +301,37 @@ async def _build_author_context(
     return "\n".join(lines)
 
 
+async def _get_ci_status(
+    token: str, repo: str, event: PullRequestEvent
+) -> tuple[str, list[str]]:
+    """Fetch the combined CI status for the PR's head commit.
+
+    Returns ``("success", [])`` on any error so a broken status check never
+    blocks the review pipeline — CI awareness is best-effort.
+    """
+    try:
+        return await client.get_commit_status(token, repo, event.pull_request.head.sha)
+    except Exception:
+        log.exception("ci_status.fetch_failed")
+        return ("success", [])
+
+
+def _format_ci_context(ci_state: str, ci_failed: list[str]) -> str:
+    """Render CI status as a compact block the agent sees as context."""
+    if ci_state == "success":
+        return "CI is passing — all checks green."
+    names = ", ".join(ci_failed[:5]) if ci_failed else "unknown checks"
+    overflow = f" (+{len(ci_failed) - 5} more)" if len(ci_failed) > 5 else ""
+    return (
+        f"CI is **failing** ({names}{overflow}). "
+        "Factor this into your review — note whether the failures relate to "
+        "the changed code or are pre-existing."
+    )
+
+
 async def _maybe_run_agent(
     token: str, repo: str, event: PullRequestEvent, files: list[dict],
-    check_findings: str = "", author_context: str = "",
+    check_findings: str = "", author_context: str = "", ci_context: str = "",
 ) -> AgentResult | None:
     """Run the review agent if it's allowlisted, configured, and under budget.
 
@@ -326,6 +354,7 @@ async def _maybe_run_agent(
         token=token, repo=repo, pr=event.pull_request, files=files,
         check_findings=check_findings,
         author_context=author_context,
+        ci_context=ci_context,
     )
     try:
         result = await asyncio.wait_for(
@@ -377,12 +406,19 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
             token, repo, event, codeowners_raw=ctx.codeowners_raw,
         )
 
+        # ── CI status: fetched for the agent and the comment banner ──────
+        ci_state, ci_failed = await _get_ci_status(token, repo, event)
+        ci_red = ci_state in ("failure", "error")
+        if ci_red:
+            log.info("pr_event.ci_red", ci_state=ci_state, failed=ci_failed)
+
         # The deterministic checks are context for the agent — its consolidated
         # review speaks for them (no separate check table in the comment).
         agent_result = await _maybe_run_agent(
             token, repo, event, ctx.files,
             check_findings=_format_check_findings(results),
             author_context=author_context,
+            ci_context=_format_ci_context(ci_state, ci_failed),
         )
         agent_assessment = agent_result.assessment if agent_result else None
         # A force-finalized run (budget/timeout/no-tool) returns a fallback
@@ -445,6 +481,7 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                 advisory_threshold=advisory_threshold,
                 changes=changes,
                 link_ctx=link_ctx,
+                ci_status=(ci_state, ci_failed) if ci_red else None,
             )
 
             if existing_comment_id:

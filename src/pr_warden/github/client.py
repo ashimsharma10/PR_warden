@@ -268,6 +268,39 @@ async def list_repo_tree(token: str, repo: str, branch: str = "HEAD") -> list[st
     return [item["path"] for item in r.json().get("tree", []) if item["type"] == "blob"]
 
 
+async def get_commit_status(
+    token: str, repo: str, sha: str
+) -> tuple[str, list[str]]:
+    """Return the combined CI status for a commit.
+
+    Uses GitHub's combined status endpoint (which merges both the legacy
+    Statuses API and the newer Check Runs).  Returns a tuple of
+    ``(state, failed_contexts)`` where *state* is one of ``"success"``,
+    ``"pending"``, ``"failure"``, or ``"error"``; *failed_contexts* lists
+    the names of any check runs / statuses that are not passing.
+
+    If the commit has no status checks at all, returns ``("success", [])``
+    so the pipeline treats it the same as a green build (many repos have no
+    CI configured).
+    """
+    r = await _client.get(
+        f"{GH_API}/repos/{repo}/commits/{sha}/status",
+        headers=_headers(token),
+    )
+    r.raise_for_status()
+    data = r.json()
+    state: str = data.get("state", "success")
+    # total_count == 0 means no checks exist — treat as passing.
+    if data.get("total_count", 0) == 0:
+        return ("success", [])
+    failed = [
+        s["context"]
+        for s in data.get("statuses", [])
+        if s.get("state") not in ("success", "pending")
+    ]
+    return (state, failed)
+
+
 async def get_codeowners(token: str, repo: str) -> str | None:
     for path in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
         content = await get_repo_file(token, repo, path)
