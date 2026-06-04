@@ -245,8 +245,65 @@ def _format_check_findings(results: list) -> str:
     return "\n".join(lines) if lines else "(no checks reported)"
 
 
+async def _build_author_context(
+    token: str, repo: str, event: PullRequestEvent,
+    codeowners_raw: str | None = None,
+) -> str:
+    """Proactive author context: history + CODEOWNERS membership.
+
+    Returns a short block the agent sees before it starts investigating, so it
+    knows whether this is a first-time contributor or a trusted regular without
+    spending a tool call. Degrades to empty string on any error so the review
+    pipeline is never blocked.
+    """
+    author = event.pull_request.user.login
+    pr_number = event.number
+    try:
+        items = await client.search_author_prs(token, repo, author, limit=10)
+    except Exception:
+        log.exception("author_context.fetch_failed")
+        return ""
+
+    # Exclude the current PR from the history
+    prior = [it for it in items if it.get("number") != pr_number]
+    merged = sum(
+        1 for it in prior
+        if bool((it.get("pull_request") or {}).get("merged_at"))
+    )
+
+    # CODEOWNERS membership: is this author listed as an owner?
+    is_codeowner = False
+    if codeowners_raw:
+        from pr_warden.checks.impact import parse_codeowners
+        rules = parse_codeowners(codeowners_raw)
+        owner_names = set()
+        for rule in rules:
+            for o in rule.owners:
+                # Strip leading @ and org/ prefix for comparison
+                name = o.lstrip("@")
+                if "/" in name:
+                    name = name.split("/", 1)[1]
+                owner_names.add(name.lower())
+        is_codeowner = author.lower() in owner_names
+
+    lines: list[str] = []
+
+    if not prior:
+        lines.append("First-time contributor to this repo — no prior PRs.")
+    else:
+        lines.append(
+            f"{len(prior)} prior PR(s) on this repo, {merged} merged."
+        )
+
+    if is_codeowner:
+        lines.append("Listed in CODEOWNERS for this repo.")
+
+    return "\n".join(lines)
+
+
 async def _maybe_run_agent(
-    token: str, repo: str, event: PullRequestEvent, files: list[dict], check_findings: str = ""
+    token: str, repo: str, event: PullRequestEvent, files: list[dict],
+    check_findings: str = "", author_context: str = "",
 ) -> AgentResult | None:
     """Run the review agent if it's allowlisted, configured, and under budget.
 
@@ -268,6 +325,7 @@ async def _maybe_run_agent(
     pr_ctx = PRContext(
         token=token, repo=repo, pr=event.pull_request, files=files,
         check_findings=check_findings,
+        author_context=author_context,
     )
     try:
         result = await asyncio.wait_for(
@@ -313,10 +371,18 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
         esc = config.advisory_escalation
         advisory_threshold = esc.threshold if esc.enabled else None
 
+        # Author context: proactive history + CODEOWNERS, so the agent doesn't
+        # burn a tool call finding out if this is a first-timer or a regular.
+        author_context = await _build_author_context(
+            token, repo, event, codeowners_raw=ctx.codeowners_raw,
+        )
+
         # The deterministic checks are context for the agent — its consolidated
         # review speaks for them (no separate check table in the comment).
         agent_result = await _maybe_run_agent(
-            token, repo, event, ctx.files, check_findings=_format_check_findings(results)
+            token, repo, event, ctx.files,
+            check_findings=_format_check_findings(results),
+            author_context=author_context,
         )
         agent_assessment = agent_result.assessment if agent_result else None
         # A force-finalized run (budget/timeout/no-tool) returns a fallback
