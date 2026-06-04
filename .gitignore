@@ -5,6 +5,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+coverage.xml
+diff-cover.md
+htmlcov/
 .venv/
 .venv2/
 dist/

@@ -152,6 +152,20 @@ Or via Docker: `docker compose up`.
 
 Tests: `pytest -q`.
 
+### CI & diff coverage
+
+`.github/workflows/ci.yml` runs the suite on every PR and push. On PRs it also
+runs [`diff-cover`](https://github.com/Bachmann1234/diff_cover) — **not** total
+coverage, just "are the lines this PR changed exercised by any test?" — and
+fails under 80%. That's the one signal most correlated with "will this break in
+prod," and it's the deterministic answer to the coverage question the bot's
+`no_tests` check only approximates. Reproduce locally:
+
+```bash
+pytest --cov=src/pr_warden --cov-report=xml
+diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
+```
+
 ## Configuration (env)
 
 | Variable | Purpose | Default |
