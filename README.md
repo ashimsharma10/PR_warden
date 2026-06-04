@@ -177,3 +177,7 @@ Tests: `pytest -q`.
 - **Additive, never fatal.** The agent layer can fail in any way and the base
   pipeline still posts.
 - **Maintainer always owns the decision.** The bot suggests; humans decide.
+
+## License
+
+Released under the [MIT License](LICENSE).
