@@ -317,7 +317,10 @@ async def _get_ci_status(
 
 
 def _format_ci_context(ci_state: str, ci_failed: list[str]) -> str:
-    """Render CI status as a compact block the agent sees as context."""
+    """Render CI status as a compact block the agent sees as context.
+
+    Always included (even when green) so the agent can reason about it.
+    """
     if ci_state == "success":
         return "CI is passing — all checks green."
     names = ", ".join(ci_failed[:5]) if ci_failed else "unknown checks"
@@ -482,7 +485,7 @@ async def _handle_pr_event(event: PullRequestEvent, trace_id: str) -> None:
                 changes=changes,
                 link_ctx=link_ctx,
                 ci_status=(ci_state, ci_failed) if ci_red else None,
-            )
+            )  # ci_status banner only rendered on failure/error
 
             if existing_comment_id:
                 await client.update_comment(token, repo, existing_comment_id, comment_body)

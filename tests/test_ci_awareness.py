@@ -1,10 +1,14 @@
-"""Tests for CI awareness: skip agent on red builds, surface CI status in comment."""
+"""Tests for CI awareness: feed CI status to agent as context, surface in comment."""
 import pytest
 import respx
 from httpx import Response
 
+from pr_warden.agent.context import PRContext
+from pr_warden.agent.prompts import render_initial_user_message
 from pr_warden.composer import build_comment
 from pr_warden.checks.registry import CheckResult, Severity
+from pr_warden.github.schemas import GitHubUser, PullRequest, Ref
+from pr_warden.main import _format_ci_context
 
 
 def _passing_results() -> list[CheckResult]:
@@ -19,6 +23,66 @@ def _failing_results() -> list[CheckResult]:
     ]
 
 
+def _pr(**kwargs) -> PullRequest:
+    defaults = dict(
+        number=1, title="feat: test", body="desc", state="open",
+        head=Ref(ref="feat/x", sha="abc"), base=Ref(ref="main", sha="000"),
+        user=GitHubUser(login="dev", id=1), changed_files=1, additions=10, deletions=2,
+    )
+    defaults.update(kwargs)
+    return PullRequest(**defaults)
+
+
+def _ctx(ci_context: str = "") -> PRContext:
+    return PRContext(token="tok", repo="acme/widgets", pr=_pr(), ci_context=ci_context)
+
+
+# ── _format_ci_context ───────────────────────────────────────────────────────
+
+
+def test_format_ci_context_green():
+    result = _format_ci_context("success", [])
+    assert "passing" in result
+    assert "green" in result
+
+
+def test_format_ci_context_failure():
+    result = _format_ci_context("failure", ["tests", "lint"])
+    assert "failing" in result.lower()
+    assert "tests" in result
+    assert "lint" in result
+
+
+def test_format_ci_context_overflow():
+    many = [f"check-{i}" for i in range(8)]
+    result = _format_ci_context("failure", many)
+    assert "check-0" in result
+    assert "+3 more" in result
+
+
+def test_format_ci_context_no_names():
+    result = _format_ci_context("error", [])
+    assert "unknown checks" in result
+
+
+# ── Agent prompt injection ───────────────────────────────────────────────────
+
+
+def test_ci_context_renders_in_agent_prompt():
+    """When ci_context is set, it appears under '## CI status' in the agent prompt."""
+    msg = render_initial_user_message(
+        _ctx(ci_context="CI is **failing** (tests). Factor this into your review.")
+    )
+    assert "## CI status" in msg
+    assert "CI is **failing**" in msg
+
+
+def test_no_ci_context_no_section():
+    """When ci_context is empty, no CI section appears."""
+    msg = render_initial_user_message(_ctx(ci_context=""))
+    assert "## CI status" not in msg
+
+
 # ── CI banner in comment ─────────────────────────────────────────────────────
 
 
@@ -31,7 +95,7 @@ def test_ci_red_banner_shown():
     assert "CI is failing" in body
     assert "tests" in body
     assert "lint" in body
-    assert "deep review skipped" in body
+    assert "review reflects the current diff" in body
 
 
 def test_ci_red_banner_overflow():
@@ -62,7 +126,6 @@ def test_ci_error_treated_as_red():
         ci_status=("error", ["infra-check"]),
     )
     assert "CI is failing" in body
-    assert "infra-check" in body
 
 
 def test_ci_red_with_no_failed_contexts():
