@@ -15,6 +15,7 @@ from pr_warden.agent.loop import run_agent
 from pr_warden.agent.schemas import AgentResult
 from pr_warden.checks import CheckContext, run_checks
 from pr_warden.checks.impact import run_gitleaks
+from pr_warden.checks.intent import extract_issue_refs
 from pr_warden.composer import (
     MANAGED_LABELS,
     LinkContext,
@@ -209,6 +210,10 @@ async def _build_check_context(
     # run_gitleaks needs the file list, so it runs after the first gather
     gitleaks_findings = await run_gitleaks(actual_files)
 
+    # Issues the PR claims to address (Closes/Fixes #N) — fed to the deterministic
+    # intent_scope check. Best-effort: any failure yields [] (treated as no data).
+    linked_issues = await _fetch_linked_issues(token, repo, event.pull_request.body)
+
     return CheckContext(
         pr=event.pull_request,
         files=actual_files,
@@ -217,7 +222,39 @@ async def _build_check_context(
         repo_tree=repo_tree if isinstance(repo_tree, list) else [],
         codeowners_raw=codeowners if isinstance(codeowners, str) else None,
         gitleaks_findings=gitleaks_findings,
+        linked_issues=linked_issues,
     )
+
+
+# Cap how many linked issues we resolve — a PR body can reference many, but a
+# handful is plenty of signal and bounds the extra API calls.
+_MAX_LINKED_ISSUES = 5
+
+
+async def _fetch_linked_issues(
+    token: str, repo: str, body: str | None
+) -> list[dict]:
+    """Resolve the issues a PR body links via closing keywords to title/body.
+
+    Best-effort and bounded: returns ``[]`` when none are referenced or every
+    fetch fails, so the intent_scope check simply sees "no data" and passes.
+    """
+    numbers = extract_issue_refs(body or "")[:_MAX_LINKED_ISSUES]
+    if not numbers:
+        return []
+    results = await asyncio.gather(
+        *(client.get_issue(token, repo, n) for n in numbers),
+        return_exceptions=True,
+    )
+    issues: list[dict] = []
+    for number, issue in zip(numbers, results):
+        if isinstance(issue, dict):
+            issues.append({
+                "number": number,
+                "title": issue.get("title", "") or "",
+                "body": issue.get("body", "") or "",
+            })
+    return issues
 
 
 async def _today_agent_cost() -> float:

@@ -53,7 +53,7 @@ labels** a maintainer routes on (older status labels are stripped automatically)
 | `prwarden:blocker` | a HIGH-severity check failed (`secret_leak`, `critical_path`) |
 | `prwarden:security` | a security-kind check failed |
 | `prwarden:ai-authored` | `ai_branch` or `ai_commit_footer` tripped |
-| `prwarden:intent-mismatch` | the agent (when it finished) found diff ≠ stated intent |
+| `prwarden:intent-mismatch` | `intent_scope` flagged a linked issue the diff misses, or the agent found diff ≠ stated intent |
 
 Facets are additive and independent — a PR off an AI-named branch with no real
 flags gets `ai-authored` and nothing else.
@@ -86,6 +86,14 @@ flags gets `ai-authored` and nothing else.
 - `codeowners` — changed files have a required CODEOWNERS reviewer
 - `secret_leak` — `gitleaks` scan of the diff additions surfaced a secret
 
+**Intent & scope** (`checks/intent.py`)
+- `intent_scope` — the always-on, no-LLM counterpart to the agent's
+  `intent_matches_diff`. When the PR links an issue via a closing keyword
+  (`Closes #123`) and that issue names a *real, distinctive* module of the repo
+  the diff never touches — "issue says auth, diff touches billing" — it flags
+  scope drift and applies the `intent-mismatch` facet. Set
+  `require_linked_issue: true` to also flag PRs that link no issue at all.
+
 ### Per-repo config
 
 Drop a `.github/prwarden.yml` to tune thresholds or disable individual checks.
@@ -102,6 +110,9 @@ checks:
     exempt_paths: ["docs/**", "scripts/one_off/**"]
   critical_path:
     globs: ["auth/**", "payments/**", "migrations/**", ".github/workflows/**"]
+  intent_scope:
+    require_linked_issue: true          # also flag PRs that link no issue
+    ignore_modules: ["src", "lib"]      # dir names too generic to be a signal
 ```
 
 ## The review agent
