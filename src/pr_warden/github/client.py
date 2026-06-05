@@ -5,7 +5,49 @@ log = structlog.get_logger()
 
 GH_API = "https://api.github.com"
 
-_client = httpx.AsyncClient(timeout=30.0)
+
+async def _log_response(response: httpx.Response) -> None:
+    """Log every GitHub response from one place, so no failure is silent.
+
+    Registered as an httpx response hook, so it fires for *every* call — auth,
+    contents, pulls, comments, labels, GraphQL — without touching call sites.
+    The bound contextvars (trace_id, repo, pr) ride along automatically.
+
+    Success is logged at DEBUG (off unless PRWARDEN_LOG_LEVEL=DEBUG, so normal
+    runs stay quiet). An error is logged at WARNING with the fields
+    `raise_for_status()` would otherwise discard: GitHub's own `message`/`errors`,
+    the rate-limit signal, and the request id — i.e. exactly what tells a
+    permission denial apart from a secondary rate limit. The path is logged
+    without its query string, so nothing sensitive lands in the log.
+    """
+    req = response.request
+    base = {
+        "method": req.method,
+        "path": req.url.path,
+        "status": response.status_code,
+        "request_id": response.headers.get("x-github-request-id"),
+    }
+    if response.is_success:
+        log.debug("github.response", **base)
+        return
+    await response.aread()  # body isn't streamed yet inside a response hook
+    try:
+        payload = response.json()
+        message, errors = payload.get("message"), payload.get("errors")
+    except Exception:  # noqa: BLE001 — a non-JSON error body must still be logged
+        message, errors = (response.text or "")[:500], None
+    log.warning(
+        "github.response_error",
+        **base,
+        message=message,
+        errors=errors,
+        rate_remaining=response.headers.get("x-ratelimit-remaining"),
+        rate_reset=response.headers.get("x-ratelimit-reset"),
+        retry_after=response.headers.get("retry-after"),
+    )
+
+
+_client = httpx.AsyncClient(timeout=30.0, event_hooks={"response": [_log_response]})
 
 
 async def close() -> None:

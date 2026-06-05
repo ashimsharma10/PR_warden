@@ -304,7 +304,7 @@ def build_comment(
     if failing:
         parts.append(failing)
 
-    parts.append("\n\n---\n*Powered by PRwarden · `/prwarden recheck` to re-run*")
+    parts.append("\n\n---\n*Push a new commit to re-run the review.*")
     return "\n".join(parts)
 
 
